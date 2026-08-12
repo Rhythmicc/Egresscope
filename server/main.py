@@ -53,7 +53,7 @@ class Settings:
     admin_username: str = _env("EGRESSCOPE_ADMIN_USERNAME", "SSSLAB_ADMIN_USERNAME", "admin")
     admin_password: str = _env("EGRESSCOPE_ADMIN_PASSWORD", "SSSLAB_ADMIN_PASSWORD")
     secure_cookie: bool = _env("EGRESSCOPE_SECURE_COOKIE", "SSSLAB_SECURE_COOKIE", "true").lower() == "true"
-    retention_days: int = int(_env("EGRESSCOPE_AUDIT_RETENTION_DAYS", "SSSLAB_AUDIT_RETENTION_DAYS", "14"))
+    retention_days: int = int(_env("EGRESSCOPE_AUDIT_RETENTION_DAYS", "SSSLAB_AUDIT_RETENTION_DAYS", "30"))
     poll_interval: float = float(_env("EGRESSCOPE_POLL_INTERVAL", "SSSLAB_POLL_INTERVAL", "2"))
     device_aliases_path: Path = Path(_env("EGRESSCOPE_DEVICE_ALIASES", "SSSLAB_DEVICE_ALIASES", "/data/devices.json"))
     default_rule_sets_path: Path = Path(_env("EGRESSCOPE_DEFAULT_RULE_SETS", "SSSLAB_DEFAULT_RULE_SETS", str(Path(__file__).with_name("default-rule-sets.json"))))
@@ -86,6 +86,13 @@ DASHBOARD_TIMELINE_RANGES: dict[str, tuple[int, int, str]] = {
     "7d": (7 * 24 * 60 * 60, 60 * 60, "%m-%d %H:%M"),
     "14d": (14 * 24 * 60 * 60, 2 * 60 * 60, "%m-%d %H:%M"),
     "month": (31 * 24 * 60 * 60, 24 * 60 * 60, "%m-%d"),
+}
+CONNECTION_HISTORY_RANGES = {
+    "1h": 60 * 60,
+    "6h": 6 * 60 * 60,
+    "24h": 24 * 60 * 60,
+    "7d": 7 * 24 * 60 * 60,
+    "30d": 30 * 24 * 60 * 60,
 }
 
 
@@ -1576,6 +1583,12 @@ def _display_node_name(name: str) -> str:
 def _duration(start: str | None) -> str:
     if not start:
         return "—"
+    try:
+        begun = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        seconds = max(0, int((datetime.now(timezone.utc) - begun).total_seconds()))
+        return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+    except ValueError:
+        return "—"
 
 
 def _start_timestamp(start: str | None, fallback: int) -> int:
@@ -1585,12 +1598,6 @@ def _start_timestamp(start: str | None, fallback: int) -> int:
         return int(datetime.fromisoformat(start.replace("Z", "+00:00")).timestamp())
     except ValueError:
         return fallback
-    try:
-        begun = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        seconds = max(0, int((datetime.now(timezone.utc) - begun).total_seconds()))
-        return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
-    except ValueError:
-        return "—"
 
 
 def _aliases() -> dict[str, str]:
@@ -1981,6 +1988,7 @@ class TrafficCollector:
             connection.execute("DELETE FROM traffic_samples WHERE ts < ?", (cutoff,))
             connection.execute("DELETE FROM traffic_detail_samples WHERE ts < ?", (cutoff,))
             connection.execute("DELETE FROM traffic_flow_samples WHERE ts < ?", (cutoff,))
+            connection.execute("DELETE FROM connection_sessions WHERE last_seen_at < ?", (cutoff,))
             connection.execute("DELETE FROM traffic_detail_daily_rollups WHERE day_start < ?", (day_start - 400 * 86400,))
             connection.execute("DELETE FROM traffic_flow_daily_rollups WHERE day_start < ?", (day_start - 400 * 86400,))
 
@@ -2684,6 +2692,122 @@ async def dashboard(
 @app.get("/api/connections")
 async def connections(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     return {"connections": collector.visible_connections(user)}
+
+
+def _connection_statistics(
+    user: dict[str, Any],
+    range_key: str,
+    status: str,
+    limit: int,
+    offset: int,
+) -> dict[str, Any]:
+    now = int(time.time())
+    start = now - CONNECTION_HISTORY_RANGES[range_key]
+    allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    scope_conditions = ["last_seen_at >= ?"]
+    scope_parameters: list[Any] = [start]
+    if INFRASTRUCTURE_SOURCE_IPS:
+        placeholders = ",".join("?" for _ in INFRASTRUCTURE_SOURCE_IPS)
+        scope_conditions.append(f"device NOT IN ({placeholders})")
+        scope_parameters.extend(sorted(INFRASTRUCTURE_SOURCE_IPS))
+    if allowed is not None:
+        if not allowed:
+            scope_conditions.append("1 = 0")
+        else:
+            placeholders = ",".join("?" for _ in allowed)
+            scope_conditions.append(f"device IN ({placeholders})")
+            scope_parameters.extend(sorted(allowed))
+    scope_where = " AND ".join(scope_conditions)
+    status_condition = "ended_at IS NULL" if status == "active" else "ended_at IS NOT NULL" if status == "history" else "1 = 1"
+    aliases = _aliases()
+    with _db() as connection:
+        summary = connection.execute(
+            f"""
+            SELECT COUNT(*) total,
+                   SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END) active,
+                   SUM(CASE WHEN ended_at IS NOT NULL THEN 1 ELSE 0 END) history,
+                   COUNT(DISTINCT device) devices,
+                   COALESCE(SUM(upload_bytes + download_bytes), 0) traffic
+            FROM connection_sessions WHERE {scope_where}
+            """,
+            scope_parameters,
+        ).fetchone()
+        matched = connection.execute(
+            f"SELECT COUNT(*) count FROM connection_sessions WHERE {scope_where} AND {status_condition}",
+            scope_parameters,
+        ).fetchone()
+        rows = connection.execute(
+            f"""
+            SELECT id,device,host,destination_ip,destination_port,network,rule,chain,
+                   started_at,last_seen_at,ended_at,upload_bytes,download_bytes,termination_reason
+            FROM connection_sessions
+            WHERE {scope_where} AND {status_condition}
+            ORDER BY CASE WHEN ended_at IS NULL THEN 0 ELSE 1 END, last_seen_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*scope_parameters, limit, offset],
+        ).fetchall()
+    live = {row["id"]: row for row in collector.visible_connections(user)}
+    sessions = []
+    for row in rows:
+        source_ip = str(row["device"])
+        active_row = live.get(str(row["id"]))
+        chain_value = row["chain"] or "[]"
+        try:
+            chain = [str(item) for item in json.loads(chain_value)]
+        except (json.JSONDecodeError, TypeError):
+            chain = [str(chain_value)] if chain_value else ["DIRECT"]
+        started_at = int(row["started_at"] or row["last_seen_at"] or now)
+        ended_at = int(row["ended_at"]) if row["ended_at"] is not None else None
+        duration_seconds = max(0, (ended_at or now) - started_at)
+        sessions.append(
+            {
+                "id": str(row["id"]),
+                "device": aliases.get(source_ip, source_ip),
+                "sourceIP": source_ip,
+                "host": str(row["host"] or ""),
+                "destinationIP": str(row["destination_ip"] or ""),
+                "destinationPort": str(row["destination_port"] or ""),
+                "network": str(row["network"] or "tcp"),
+                "rule": str(row["rule"] or "Match"),
+                "chain": chain or ["DIRECT"],
+                "startedAt": started_at,
+                "lastSeenAt": int(row["last_seen_at"] or started_at),
+                "endedAt": ended_at,
+                "status": "active" if ended_at is None else "ended",
+                "upload": int(row["upload_bytes"] or 0),
+                "download": int(row["download_bytes"] or 0),
+                "upRate": int(active_row.get("upRate", 0)) if active_row else 0,
+                "downRate": int(active_row.get("downRate", 0)) if active_row else 0,
+                "durationSeconds": duration_seconds,
+                "terminationReason": row["termination_reason"],
+            }
+        )
+    return {
+        "range": range_key,
+        "status": status,
+        "retentionDays": settings.retention_days,
+        "summary": {
+            "active": int(summary["active"] or 0),
+            "history": int(summary["history"] or 0),
+            "total": int(summary["total"] or 0),
+            "devices": int(summary["devices"] or 0),
+            "traffic": int(summary["traffic"] or 0),
+            "matched": int(matched["count"] or 0),
+        },
+        "sessions": sessions,
+    }
+
+
+@app.get("/api/connection-statistics")
+async def connection_statistics(
+    range: str = Query(default="24h", pattern="^(1h|6h|24h|7d|30d)$"),
+    status: str = Query(default="active", pattern="^(active|history|all)$"),
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    return await asyncio.to_thread(_connection_statistics, user, range, status, limit, offset)
 
 
 @app.delete("/api/connections")

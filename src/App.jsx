@@ -76,7 +76,7 @@ const DEMO_MODE = import.meta.env.DEV || import.meta.env.VITE_DEMO_MODE === "tru
 
 const NAV = [
   { id: "dashboard", label: "状态概览", icon: Gauge, viewer: true },
-  { id: "connections", label: "实时连接", icon: PlugsConnected, viewer: true },
+  { id: "connections", label: "连接统计", icon: PlugsConnected, viewer: true },
   { id: "audit", label: "流量分析", icon: ListMagnifyingGlass, viewer: true },
   { id: "strategies", label: "分流策略", icon: ArrowsDownUp },
   { id: "rules", label: "规则管理", icon: SlidersHorizontal },
@@ -87,7 +87,7 @@ const NAV = [
 
 const PAGE_TITLES = {
   dashboard: ["状态概览", "整个局域网的实时运行概览"],
-  connections: ["实时连接", "查看当前活跃会话及完整转发链路"],
+  connections: ["连接统计", "查看活跃会话与最近 30 天连接记录"],
   audit: ["流量分析", "按服务、目标地址和来源设备回溯流量"],
   strategies: ["分流策略", "常用策略优先，配置顺序保持可追溯"],
   rules: ["规则管理", "规则集、请求匹配与节点来源相互独立"],
@@ -111,6 +111,14 @@ const bytes = (value = 0) => {
 
 const rate = (value = 0) => `${bytes(value)}/s`;
 const bucketDuration = (seconds = 0) => seconds >= 86400 ? `${seconds / 86400} 天` : seconds >= 3600 ? `${seconds / 3600} 小时` : seconds >= 60 ? `${seconds / 60} 分钟` : `${seconds} 秒`;
+const connectionDuration = (seconds = 0) => {
+  const value = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor(value % 3600 / 60);
+  const secs = Math.floor(value % 60);
+  return hours ? `${hours}时 ${minutes}分` : minutes ? `${minutes}分 ${secs}秒` : `${secs}秒`;
+};
+const connectionTime = (timestamp) => timestamp ? new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(timestamp * 1000)) : "—";
 
 function StatusPill({ online }) {
   return (
@@ -299,6 +307,30 @@ function ConnectionTable({ connections, onDevice, onSelect, onContext, dense = f
   );
 }
 
+function ConnectionStatisticsTable({ connections, onSelect, onContext, dense = false }) {
+  return <div className={`connection-table-wrap operational statistics-table-wrap ${dense ? "dense" : ""}`} data-testid="connections-scroll">
+    <table className="connection-table statistics-table">
+      <thead><tr><th>状态</th><th>设备</th><th>目标</th><th>协议</th><th>命中规则</th><th>策略链路</th><th className="numeric">上传</th><th className="numeric">下载</th><th className="numeric">总流量</th><th>连接时间</th></tr></thead>
+      <tbody>{connections.length ? connections.map(connection => {
+        const protocol = connectionProtocol(connection);
+        const active = connection.status === "active";
+        return <tr key={connection.id} className={active ? "is-moving" : "is-ended"} onClick={() => onSelect?.(connection)} onContextMenu={event => { event.preventDefault(); onContext?.(event, connection); }}>
+          <td><span className={`connection-status ${active ? "active" : "ended"}`}><i />{active ? "活跃" : "已结束"}</span></td>
+          <td><span className="connection-device"><span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></span></td>
+          <td><strong>{connection.host || connection.destinationIP}</strong><small>{connection.destinationIP}:{connection.destinationPort}</small></td>
+          <td><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></td>
+          <td>{connection.rule}</td>
+          <td><div className="chain-text">{connection.chain.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}</div></td>
+          <td className="numeric up">{bytes(connection.upload)}</td>
+          <td className="numeric down">{bytes(connection.download)}</td>
+          <td className="numeric cumulative">{bytes((connection.upload || 0) + (connection.download || 0))}</td>
+          <td><strong>{connectionTime(connection.startedAt)}</strong><small>{active ? connectionDuration(connection.durationSeconds) : `结束 ${connectionTime(connection.endedAt)}`}</small></td>
+        </tr>;
+      }) : <tr className="connection-table-empty"><td colSpan="10">当前筛选条件下没有连接记录</td></tr>}</tbody>
+    </table>
+  </div>;
+}
+
 function ConnectionContextMenu({ state, canManage, onClose, onInspect, onDevice, onTerminate, onAddRule }) {
   if (!state) return null;
   const connection = state.connection;
@@ -306,7 +338,7 @@ function ConnectionContextMenu({ state, canManage, onClose, onInspect, onDevice,
     <div className="context-target"><strong>{connection.host || connection.destinationIP}</strong><span>{connection.device} · {bytes((connection.upload || 0) + (connection.download || 0))}</span></div>
     <button onClick={() => { onInspect(connection); onClose(); }}><ListMagnifyingGlass />连接详情</button>
     <button onClick={() => { onDevice({ name: connection.device, ip: connection.sourceIP }); onClose(); }}><Desktop />设备流量历史</button>
-    {canManage && <><div className="context-divider"/><button onClick={() => { onAddRule(connection); onClose(); }}><Plus />为目标增加规则</button><button className="danger" onClick={() => { onTerminate(connection.id); onClose(); }}><Power />终止连接</button></>}
+    {canManage && <><div className="context-divider"/><button onClick={() => { onAddRule(connection); onClose(); }}><Plus />为目标增加规则</button>{connection.status !== "ended" && <button className="danger" onClick={() => { onTerminate(connection.id); onClose(); }}><Power />终止连接</button>}</>}
   </div>;
 }
 
@@ -316,13 +348,15 @@ function ConnectionInspector({ connection, onClose, onDevice }) {
   const total = (connection.upload || 0) + (connection.download || 0);
   return <div className="connection-inspector-layer" onMouseDown={onClose}>
     <aside className="connection-inspector" onMouseDown={event => event.stopPropagation()}>
-      <div className="inspector-heading"><div><span>连接详情</span><h2>{connection.host || connection.destinationIP}</h2></div><button onClick={onClose}><X /></button></div>
-      <div className="inspector-summary"><div><span>累计流量</span><strong>{bytes(total)}</strong></div><div><span>当前速率</span><strong>{rate((connection.upRate || 0) + (connection.downRate || 0))}</strong></div></div>
+      <div className="inspector-heading"><div><span>{connection.status === "ended" ? "历史连接" : "连接详情"}</span><h2>{connection.host || connection.destinationIP}</h2></div><button onClick={onClose}><X /></button></div>
+      <div className="inspector-summary"><div><span>累计流量</span><strong>{bytes(total)}</strong></div><div><span>{connection.status === "ended" ? "连接时长" : "当前速率"}</span><strong>{connection.status === "ended" ? connectionDuration(connection.durationSeconds) : rate((connection.upRate || 0) + (connection.downRate || 0))}</strong></div></div>
       <dl className="connection-facts">
         <div><dt>来源设备</dt><dd>{connection.device}<small>{connection.sourceIP}</small></dd></div>
         <div><dt>目标地址</dt><dd>{connection.host || "IP 连接"}<small>{connection.destinationIP}:{connection.destinationPort}</small></dd></div>
         <div><dt>协议</dt><dd><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></dd></div>
-        <div><dt>持续时间</dt><dd>{connection.duration}</dd></div>
+        <div><dt>持续时间</dt><dd>{connection.duration || connectionDuration(connection.durationSeconds)}</dd></div>
+        {connection.startedAt && <div><dt>开始时间</dt><dd>{connectionTime(connection.startedAt)}</dd></div>}
+        {connection.startedAt && <div><dt>结束时间</dt><dd>{connection.endedAt ? connectionTime(connection.endedAt) : "仍在活动"}</dd></div>}
         <div><dt>上传</dt><dd>{bytes(connection.upload)}<small>{rate(connection.upRate)}</small></dd></div>
         <div><dt>下载</dt><dd>{bytes(connection.download)}<small>{rate(connection.downRate)}</small></dd></div>
         <div className="wide"><dt>命中规则</dt><dd>{connection.rule}</dd></div>
@@ -408,7 +442,7 @@ function Dashboard({ data, strategies, onDevice, onNavigate, canManage }) {
         {canManage && <StrategySummary strategies={strategies} onOpen={() => onNavigate("strategies")} />}
       </div>
       <section className="panel live-panel">
-        <div className="panel-heading"><h2>实时连接</h2><button className="text-button" onClick={() => onNavigate("connections")}>查看全部连接</button></div>
+        <div className="panel-heading"><h2>当前活跃连接</h2><button className="text-button" onClick={() => onNavigate("connections")}>查看连接统计</button></div>
         <ConnectionTable connections={data.connections.slice(0, 6)} onDevice={onDevice} dense />
       </section>
     </div>
@@ -495,10 +529,21 @@ function DeviceFlow({ device, onBack }) {
   );
 }
 
+const demoConnectionStatistics = (data, status) => {
+  const now = Math.floor(Date.now() / 1000);
+  const active = (data.connections || []).slice(0, 18).map((connection, index) => ({ ...connection, status: "active", startedAt: now - 240 - index * 93, lastSeenAt: now, endedAt: null, durationSeconds: 240 + index * 93 }));
+  const history = (data.connections || []).slice(8, 38).map((connection, index) => ({ ...connection, id: `history-${connection.id}`, status: "ended", startedAt: now - 3600 - index * 420, lastSeenAt: now - 480 - index * 180, endedAt: now - 480 - index * 180, durationSeconds: 310 + index * 37, upRate: 0, downRate: 0 }));
+  const all = status === "active" ? active : status === "history" ? history : [...active, ...history];
+  const everySession = [...active, ...history];
+  return { range: "24h", status, retentionDays: 30, summary: { active: active.length, history: history.length, total: everySession.length, devices: new Set(everySession.map(item => item.sourceIP)).size, traffic: everySession.reduce((sum, item) => sum + item.upload + item.download, 0), matched: all.length }, sessions: all };
+};
+
 function ConnectionsPage({ data, onDevice, canManage }) {
   const [query, setQuery] = useState("");
   const [deviceFilter, setDeviceFilter] = useState("");
   const [networkFilter, setNetworkFilter] = useState("");
+  const [mode, setMode] = useState("active");
+  const [range, setRange] = useState("24h");
   const [paused, setPaused] = useState(false);
   const [snapshot, setSnapshot] = useState([]);
   const [compact, setCompact] = useState(true);
@@ -506,10 +551,27 @@ function ConnectionsPage({ data, onDevice, canManage }) {
   const [contextMenu, setContextMenu] = useState(null);
   const [inspected, setInspected] = useState(null);
   const [quickRule, setQuickRule] = useState(null);
-  const source = paused ? snapshot : data.connections;
-  const devices = [...new Map(data.connections.map(connection => [connection.sourceIP, { ip: connection.sourceIP, name: connection.device }])).values()].sort((a,b) => a.name.localeCompare(b.name));
+  const [statistics, setStatistics] = useState(() => demoConnectionStatistics(data, "active"));
+  const [loading, setLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    let mounted = true;
+    let timer;
+    const load = async () => {
+      if (paused) return;
+      setLoading(true);
+      try { const result = await api.connectionStatistics(range, mode); if (mounted) setStatistics(result); }
+      catch (error) { if (DEMO_MODE && mounted) setStatistics(demoConnectionStatistics(data, mode)); else if (mounted) setMessage(error.message); }
+      finally { if (mounted) setLoading(false); }
+    };
+    load();
+    timer = setInterval(load, mode === "active" ? 5000 : 15000);
+    return () => { mounted = false; clearInterval(timer); };
+  }, [range, mode, paused, refreshKey]);
+  const source = paused ? snapshot : statistics.sessions || [];
+  const devices = [...new Map((statistics.sessions || []).map(connection => [connection.sourceIP, { ip: connection.sourceIP, name: connection.device }])).values()].sort((a,b) => a.name.localeCompare(b.name));
   const filtered = source.filter((c) => (!deviceFilter || c.sourceIP === deviceFilter) && (!networkFilter || connectionProtocol(c) === networkFilter) && `${c.device} ${c.sourceIP} ${c.host} ${c.destinationIP} ${c.rule} ${c.chain.join(" ")}`.toLowerCase().includes(query.toLowerCase()));
-  const togglePause = () => { if (!paused) setSnapshot(data.connections); setPaused(current => !current); };
+  const togglePause = () => { if (!paused) setSnapshot(statistics.sessions || []); setPaused(current => !current); };
   useEffect(() => {
     if (!contextMenu) return undefined;
     const close = () => setContextMenu(null);
@@ -521,7 +583,7 @@ function ConnectionsPage({ data, onDevice, canManage }) {
   }, [contextMenu]);
   const openContextMenu = (event, connection) => setContextMenu({ connection, x: Math.max(8, Math.min(event.clientX, window.innerWidth - 246)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - (canManage ? 244 : 164))) });
   const closeOne = async (id) => {
-    try { await api.closeConnection(id); setMessage("连接已终止；列表将在下一次采样时更新。"); }
+    try { await api.closeConnection(id); setMessage("连接已终止；记录将保留在历史连接中。"); setRefreshKey(value => value + 1); }
     catch (error) { setMessage(error.message); }
   };
   const openQuickRule = async (connection) => {
@@ -538,7 +600,7 @@ function ConnectionsPage({ data, onDevice, canManage }) {
   const saveQuickRule = async (editor) => {
     setQuickRule({ ...editor, busy: true, error: "" });
     try {
-      await api.createCustomRule({ content: editor.content, placement: "before", note: `来自实时连接：${editor.connection.device}` });
+      await api.createCustomRule({ content: editor.content, placement: "before", note: `来自连接统计：${editor.connection.device}` });
       await api.applyRules();
       setMessage(`规则已应用：${editor.content}`);
       setQuickRule(null);
@@ -546,24 +608,31 @@ function ConnectionsPage({ data, onDevice, canManage }) {
   };
   const closeAll = async () => {
     if (!window.confirm("确定终止当前全部连接？应用可能会自动重连。")) return;
-    try { await api.closeAllConnections(); setMessage("全部连接已终止。"); }
+    try { await api.closeAllConnections(); setMessage("全部连接已终止，并将转入历史记录。"); setRefreshKey(value => value + 1); }
     catch (error) { setMessage(error.message); }
   };
   return (
     <div className="page-content list-page connections-page">
       <section className="panel full-height-panel connections-workspace">
-        <div className="connection-modebar"><div><button className="active">活动连接</button><button onClick={() => setNetworkFilter("")}>全部协议</button></div></div>
+        <div className="connection-stat-summary">
+          <div><span>当前活跃</span><strong>{statistics.summary?.active || 0}</strong></div>
+          <div><span>历史连接</span><strong>{statistics.summary?.history || 0}</strong></div>
+          <div><span>累计流量</span><strong>{bytes(statistics.summary?.traffic || 0)}</strong></div>
+          <div><span>涉及设备</span><strong>{statistics.summary?.devices || 0}</strong></div>
+        </div>
+        <div className="connection-modebar"><div><button className={mode === "active" ? "active" : ""} onClick={() => setMode("active")}>活跃连接</button><button className={mode === "history" ? "active" : ""} onClick={() => setMode("history")}>历史记录</button><button className={mode === "all" ? "active" : ""} onClick={() => setMode("all")}>全部连接</button></div><span><ClockCounterClockwise />数据库保留 {statistics.retentionDays || 30} 天</span></div>
         <div className="list-toolbar">
+          <select className="connection-range" value={range} onChange={event => setRange(event.target.value)}><option value="1h">最近 1 小时</option><option value="6h">最近 6 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option><option value="30d">最近 30 天</option></select>
           <select value={deviceFilter} onChange={event => setDeviceFilter(event.target.value)}><option value="">所有设备</option>{devices.map(device => <option key={device.ip} value={device.ip}>{device.name} · {device.ip}</option>)}</select>
           <select value={networkFilter} onChange={event => setNetworkFilter(event.target.value)}><option value="">所有协议</option><option value="HTTPS">HTTPS</option><option value="QUIC">QUIC</option><option value="TCP">TCP</option><option value="UDP">UDP</option></select>
           <div className="search-box"><MagnifyingGlass /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索设备、目标、规则或策略链路" />{query && <button onClick={() => setQuery("")}><X /></button>}</div>
           <button className={`toolbar-icon ${paused ? "active" : ""}`} title={paused ? "恢复自动刷新" : "暂停列表"} onClick={togglePause}>{paused ? <Pulse weight="fill" /> : <Pause weight="fill" />}</button>
           <button className="toolbar-icon" title={compact ? "切换舒适密度" : "切换紧凑密度"} onClick={() => setCompact(current => !current)}>{compact ? <Rows /> : <CirclesFour />}</button>
-          {canManage && <button className="danger-button" onClick={closeAll}>终止全部</button>}
+          {canManage && mode !== "history" && <button className="danger-button" onClick={closeAll}>终止全部</button>}
         </div>
         {message && <div className="inline-message">{message}</div>}
-        <ConnectionTable connections={filtered} onSelect={setInspected} onContext={openContextMenu} dense={compact} operational />
-        <div className="list-summary"><span className={paused ? "paused-dot" : "live-dot"} />{paused ? "已暂停" : "实时"}<b>{filtered.length} 条连接</b><span>↑ {rate(data.totals.upRate)}</span><span>↓ {rate(data.totals.downRate)}</span></div>
+        <ConnectionStatisticsTable connections={filtered} onSelect={setInspected} onContext={openContextMenu} dense={compact} />
+        <div className="list-summary"><span className={paused ? "paused-dot" : "live-dot"} />{paused ? "已暂停" : loading ? "更新中" : mode === "active" ? "实时更新" : "历史记录"}<b>{filtered.length} / {statistics.summary?.matched || 0} 条连接</b>{mode === "active" && <><span>↑ {rate(data.totals.upRate)}</span><span>↓ {rate(data.totals.downRate)}</span></>}<small>Asia/Shanghai</small></div>
       </section>
       <ConnectionContextMenu state={contextMenu} canManage={canManage} onClose={() => setContextMenu(null)} onInspect={setInspected} onDevice={onDevice} onTerminate={closeOne} onAddRule={openQuickRule} />
       <ConnectionInspector connection={inspected} onClose={() => setInspected(null)} onDevice={device => { setInspected(null); onDevice(device); }} />

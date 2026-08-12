@@ -54,6 +54,10 @@ export const api = {
   deleteCustomRule: (id) => request(`/api/rules/custom/${encodeURIComponent(id)}`, { method: "DELETE" }),
   closeConnection: (id) => request(`/api/connections/${encodeURIComponent(id)}`, { method: "DELETE" }),
   closeAllConnections: () => request("/api/connections", { method: "DELETE" }),
+  connectionStatistics: (range = "24h", status = "active", limit = 500, offset = 0) => {
+    const query = new URLSearchParams({ range, status, limit: String(limit), offset: String(offset) });
+    return request(`/api/connection-statistics?${query}`);
+  },
   deviceAliases: () => request("/api/device-aliases"),
   saveDeviceAliases: (aliases) => request("/api/device-aliases", { method: "PUT", body: JSON.stringify({ aliases }) }),
   trafficAnalysis: ({ range, device, groupBy, metric, service, attributionPeriod }) => {

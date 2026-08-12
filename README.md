@@ -6,7 +6,7 @@ Egresscope 是一个面向 mihomo 网关的多用户控制面和持久化流量�
 
 ## 功能
 
-- 状态概览、可滚动的实时连接和单连接终止
+- 状态概览、连接统计、最近 30 天历史会话和单连接终止
 - 按设备、服务、目标、策略链和出口节点统计累计流量
 - 长期保留日/月/年直连与代理流量汇总，高频明细按策略清理
 - 策略切换、受影响连接重连、节点延迟与地区分组
@@ -47,8 +47,8 @@ docker compose up -d --build
 | `EGRESSCOPE_SESSION_SECRET` | 至少 32 字符的独立随机会话密钥 |
 | `EGRESSCOPE_ADMIN_PASSWORD` | 首次启动创建管理员；数据库已有用户后不再使用 |
 
-`EGRESSCOPE_SECURE_COOKIE` 默认 `true`，时区默认 `Asia/Shanghai`，明细保留期默认
-14 天。月度和年度汇总不会随明细清理。设备别名格式见 `devices.example.json`。
+`EGRESSCOPE_SECURE_COOKIE` 默认 `true`，时区默认 `Asia/Shanghai`，明细与连接记录保留期默认
+30 天。月度和年度汇总不会随明细清理。设备别名格式见 `devices.example.json`。
 若 mihomo 配置目录限制了宿主机组权限，将 `MIHOMO_CONFIG_GID` 设为可读取该目录
 的 GID；面板只需读取配置，不应获得写权限。
 

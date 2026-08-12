@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -243,7 +243,16 @@ def _migration_3(connection: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS = (_migration_1, _migration_2, _migration_3)
+def _migration_4(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_connection_sessions_seen ON connection_sessions(last_seen_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_connection_sessions_status_seen ON connection_sessions(ended_at, last_seen_at DESC);
+        """
+    )
+
+
+MIGRATIONS = (_migration_1, _migration_2, _migration_3, _migration_4)
 
 
 def migrate(connection: sqlite3.Connection) -> None:

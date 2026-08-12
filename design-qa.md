@@ -34,3 +34,44 @@
 - No actionable P0, P1, or P2 visual issue remains in the tested state.
 
 final result: passed
+
+---
+
+# Connection statistics design QA
+
+## Visual truth and evidence
+
+- Existing live-connection workspace: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/connections-production-right-columns.png` (1280 × 720 px).
+- Final historical-connection state: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/connection-statistics-history-final.jpg` (1280 × 720 px).
+- Side-by-side comparison: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/connection-statistics-comparison-final.jpg` (2560 × 720 px).
+- Browser state: dark theme, 1280 × 720 CSS px, 历史记录 selected, 30 realistic persisted demo sessions.
+
+## Findings and iteration
+
+- Pass 1 added active/history/all modes, four compact statistics, real range/device/protocol filters, and persisted session rows. The initial 1320 px table width hid too much of the connection-time column at the default viewport (P2).
+- Pass 2 reduced fixed column widths while preserving a dedicated strategy-chain column. The final table fits the operational viewport with only a small internal horizontal allowance, keeps independent vertical scrolling, and exposes upload, download, total traffic, start time, and end time in one row.
+- Historical rows use a neutral ended state rather than a live green indicator. Destructive terminate actions are absent from historical rows and from the historical toolbar.
+- The detail drawer identifies the record as a historical connection and includes duration, start time, end time, source, target, rule, full chain, and byte totals.
+
+## Required fidelity surfaces
+
+- Typography and density: retains the existing 11–13 px operational table scale, sticky header/footer, compact rows, and larger summary numerals.
+- Spacing: summary metrics use one line each and add only 70 px; filtering and mode controls remain compact so the table keeps most of the vertical viewport.
+- Color and state: existing dark surfaces, primary blue, active green, muted historical state, protocol colors, and zebra rows are reused.
+- Assets: all icons use the existing Phosphor set. No handcrafted or placeholder visuals were introduced.
+- Copy: navigation and page title use `连接统计`; operational modes are `活跃连接`, `历史记录`, and `全部连接`; retention is stated as 30 days without redundant annotation.
+
+## Interaction and runtime checks
+
+- Active/history/all mode switching changes the queried dataset.
+- Range, device, protocol, and search controls filter real persisted records.
+- Historical row context menu contains detail, device history, and rule creation, but no termination action.
+- Historical row click opens a complete detail drawer with Asia/Shanghai timestamps.
+- The table scrolls vertically inside the panel; the document itself has no horizontal overflow.
+- Browser diagnostics contain no warnings or errors.
+
+## Remaining findings
+
+- No actionable P0, P1, or P2 visual issue remains in the tested state.
+
+final result: passed
