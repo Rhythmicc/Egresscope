@@ -908,18 +908,82 @@ function RulesPage({ canManage }) {
 }
 
 const shanghaiTime = (timestamp) => timestamp ? new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(timestamp * 1000)) : "尚无记录";
+const shanghaiDateTime = (timestamp) => timestamp ? new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(timestamp * 1000)) : "—";
+const runtimeDuration = (seconds = 0) => {
+  const value = Math.max(0, Number(seconds) || 0);
+  const days = Math.floor(value / 86400);
+  const hours = Math.floor(value % 86400 / 3600);
+  const minutes = Math.floor(value % 3600 / 60);
+  return `${days ? `${days} 天 ` : ""}${hours} 小时 ${minutes} 分钟`;
+};
+
+const DEMO_GATEWAY = {
+  runtime: {
+    startedAt: Date.parse("2026-08-10T05:30:23+08:00") / 1000, uptimeSeconds: 252557, online: true, version: "1.19.29",
+    total: 13.24 * 1024 ** 3, activeExits: 4,
+    access: [
+      { id: "gateway", name: "透明网关", up: 1.24 * 1024 ** 3, down: 4.63 * 1024 ** 3, total: 5.87 * 1024 ** 3, currentUpRate: 3400, currentDownRate: 128000, peakUpRate: 12.5 * 1024 ** 2, peakDownRate: 31.7 * 1024 ** 2, devices: ["U55C", "ssslab-login-1", "s80"] },
+      { id: "proxy", name: "显式代理", up: 1.61 * 1024 ** 3, down: 5.76 * 1024 ** 3, total: 7.37 * 1024 ** 3, currentUpRate: 1200, currentDownRate: 44000, peakUpRate: 9.8 * 1024 ** 2, peakDownRate: 24.1 * 1024 ** 2, devices: ["9462"] },
+    ],
+    exits: [
+      { name: "DIRECT", up: 2.85 * 1024 ** 3, down: 9.54 * 1024 ** 3, total: 12.39 * 1024 ** 3, currentUpRate: 0, currentDownRate: 0, peakUpRate: 22.5 * 1024 ** 2, peakDownRate: 45.7 * 1024 ** 2, activeConnections: 8 },
+      { name: "🇺🇸 奶昔-美国西雅图 04", up: 2.1 * 1024 ** 2, down: 5.6 * 1024 ** 2, total: 7.7 * 1024 ** 2, currentUpRate: 900, currentDownRate: 18200, peakUpRate: 840000, peakDownRate: 3200000, activeConnections: 4 },
+      { name: "🇺🇸 奶昔-美国圣何塞 07", up: 2.8 * 1024 ** 2, down: 6.1 * 1024 ** 2, total: 8.9 * 1024 ** 2, currentUpRate: 540, currentDownRate: 11300, peakUpRate: 620000, peakDownRate: 2700000, activeConnections: 2 },
+    ],
+  },
+  events: {
+    total: 6, retentionDays: 90, events: [
+      { id: 1, level: "info", category: "strategy", title: "策略已切换", message: "🇺🇸 美国最佳 现在指向 🇺🇸 奶昔-美国西雅图 04", createdAt: Date.parse("2026-08-13T03:07:16+08:00") / 1000 },
+      { id: 2, level: "info", category: "gateway", title: "网关已连接", message: "mihomo 控制面和流量采集均已恢复。", createdAt: Date.parse("2026-08-13T02:47:10+08:00") / 1000 },
+      { id: 3, level: "error", category: "mihomo", title: "节点连接失败", message: "proxy 🇺🇸 奶昔-美国洛杉矶 03: connection refused", createdAt: Date.parse("2026-08-13T02:43:39+08:00") / 1000 },
+      { id: 4, level: "warning", category: "mihomo", title: "节点连接超时", message: "dial timeout while connecting to upstream proxy", createdAt: Date.parse("2026-08-13T02:42:18+08:00") / 1000 },
+    ],
+  },
+};
 
 function GatewayPage({ canManage }) {
   const [aliases, setAliases] = useState({});
   const [devices, setDevices] = useState([]);
   const [message, setMessage] = useState("");
-  useEffect(() => { api.deviceAliases().then(result => { setAliases(result.aliases || {}); setDevices(result.devices || []); }).catch(error => setMessage(error.message)); }, []);
+  const [tab, setTab] = useState("runtime");
+  const [runtime, setRuntime] = useState(null);
+  const [events, setEvents] = useState({ events: [], total: 0, retentionDays: 90 });
+  const [eventLevel, setEventLevel] = useState("all");
+  const [eventQuery, setEventQuery] = useState("");
+  const [openRows, setOpenRows] = useState(new Set(["access:gateway", "exit:DIRECT"]));
+  const loadDevices = () => api.deviceAliases().then(result => { setAliases(result.aliases || {}); setDevices(result.devices || []); }).catch(error => {
+    if (DEMO_MODE) {
+      const sample = [
+        { ip: "192.168.31.42", name: "U55C", sourceType: "gateway", active: 3, lastSeen: Date.now() / 1000 },
+        { ip: "192.168.31.225", name: "ssslab-login-1", sourceType: "gateway", active: 1, lastSeen: Date.now() / 1000 },
+        { ip: "10.18.12.44", name: "9462", sourceType: "proxy", active: 2, lastSeen: Date.now() / 1000 },
+      ];
+      setDevices(sample); setAliases(Object.fromEntries(sample.map(item => [item.ip, item.name])));
+    } else setMessage(error.message);
+  });
+  const loadRuntime = () => api.gatewayRuntime().then(setRuntime).catch(error => { if (DEMO_MODE) setRuntime(DEMO_GATEWAY.runtime); else setMessage(error.message); });
+  const loadEvents = () => api.gatewayEvents({ level: eventLevel, query: eventQuery }).then(setEvents).catch(error => { if (DEMO_MODE) setEvents({ ...DEMO_GATEWAY.events, events: DEMO_GATEWAY.events.events.filter(item => eventLevel === "all" || item.level === eventLevel) }); else setMessage(error.message); });
+  useEffect(() => { loadDevices(); loadRuntime(); loadEvents(); }, []);
+  useEffect(() => { if (tab !== "runtime") return undefined; const timer = setInterval(loadRuntime, 5000); return () => clearInterval(timer); }, [tab]);
+  useEffect(() => { if (tab === "events") loadEvents(); }, [tab, eventLevel]);
   const save = async () => {
     try { const result = await api.saveDeviceAliases(aliases); setAliases(result.aliases); setMessage("设备名称已保存，仪表盘会在下一次采样时更新。"); }
     catch (error) { setMessage(error.message); }
   };
+  const toggleRow = key => setOpenRows(current => { const next = new Set(current); next.has(key) ? next.delete(key) : next.add(key); return next; });
   const known = [...new Map(devices.map(device => [device.ip, device])).values()];
-  return <div className="page-content gateway-page"><div className="strategy-intro"><h2>网关与代理设备</h2>{canManage && <button className="primary-button" onClick={save}><CheckCircle /> 保存设备名称</button>}</div>{message && <div className="inline-message">{message}</div>}<section className="panel gateway-summary"><div><span>默认网关</span><strong>192.168.31.190</strong></div><div><span>透明 DNS</span><strong>198.18.0.2</strong></div><div><span>运行模式</span><strong>TUN + 显式代理</strong></div></section><section className="panel managed-devices"><div className="panel-heading"><h2>已识别设备</h2></div><div className="device-editor-head"><span>来源 IP</span><span>设备名称</span><span>接入方式</span><span>活跃连接</span><span>最后活动</span></div>{known.map(device => <div className="device-editor-row" key={device.ip}><code>{device.ip}</code><input disabled={!canManage} value={aliases[device.ip] ?? device.name ?? ""} onChange={event => setAliases(current => ({ ...current, [device.ip]: event.target.value }))} /><span className={`device-source ${device.sourceType || "unknown"}`}><i />{device.sourceType === "proxy" ? "显式代理" : device.sourceType === "gateway" ? "局域网网关" : "未知"}</span><span className={device.active ? "device-active" : "device-idle"}>{device.active || 0}</span><time>{device.active ? "正在活动" : shanghaiTime(device.lastSeen)}</time></div>)}</section></div>;
+  const statRow = (item, kind) => { const key = `${kind}:${item.id || item.name}`; const open = openRows.has(key); return <article className={`runtime-row ${open ? "open" : ""}`} key={key}><button className="runtime-row-head" onClick={() => toggleRow(key)}><span className={`runtime-mark ${kind}`}><i /></span><span><strong>{item.name}</strong><small>{kind === "access" ? `${item.devices?.length || 0} 台设备` : `${item.activeConnections || 0} 条活跃连接`}</small></span><b>{bytes(item.total)}</b><CaretDown /></button>{open && <div className="runtime-row-detail"><span><small>上传</small><strong>{bytes(item.up)}</strong></span><span><small>下载</small><strong>{bytes(item.down)}</strong></span><span><small>当前速度</small><strong>↑ {rate(item.currentUpRate)} · ↓ {rate(item.currentDownRate)}</strong></span><span><small>峰值速度</small><strong>↑ {rate(item.peakUpRate)} · ↓ {rate(item.peakDownRate)}</strong></span>{kind === "access" && item.devices?.length > 0 && <p>{item.devices.join(" · ")}</p>}</div>}</article>; };
+  return <div className="page-content gateway-page">
+    <div className="gateway-workspace-head"><h2>网关设置</h2><div className="gateway-tabs"><button className={tab === "runtime" ? "active" : ""} onClick={() => setTab("runtime")}>运行统计</button><button className={tab === "events" ? "active" : ""} onClick={() => setTab("events")}>事件记录</button><button className={tab === "devices" ? "active" : ""} onClick={() => setTab("devices")}>设备管理</button></div>{tab === "devices" && canManage && <button className="primary-button" onClick={save}><CheckCircle /> 保存名称</button>}{tab === "runtime" && <button className="icon-action" aria-label="刷新运行统计" onClick={loadRuntime}><ArrowClockwise /></button>}{tab === "events" && <button className="icon-action" aria-label="刷新事件" onClick={loadEvents}><ArrowClockwise /></button>}</div>
+    {message && <div className="inline-message">{message}</div>}
+    {tab === "runtime" && <div className="gateway-runtime">
+      <section className="panel runtime-summary"><div><span>启动时间</span><strong>{shanghaiDateTime(runtime?.startedAt)}</strong></div><div><span>运行时长</span><strong>{runtimeDuration(runtime?.uptimeSeconds)}</strong></div><div><span>累计流量</span><strong>{bytes(runtime?.total)}</strong></div><div><span>活跃出口</span><strong>{runtime?.activeExits ?? "—"}</strong></div></section>
+      <section className="runtime-section"><div className="runtime-section-title"><h3>接入方式</h3><span className={runtime?.online ? "runtime-online" : "runtime-offline"}>{runtime?.online ? `mihomo ${runtime?.version || ""}` : "网关离线"}</span></div><div className="panel runtime-list">{(runtime?.access || []).map(item => statRow(item, "access"))}</div></section>
+      <section className="runtime-section"><div className="runtime-section-title"><h3>出口与节点</h3><span>{runtime?.exits?.length || 0} 个已记录出口</span></div><div className="panel runtime-list">{(runtime?.exits || []).map(item => statRow(item, "exit"))}</div></section>
+    </div>}
+    {tab === "events" && <div className="gateway-events"><div className="event-toolbar"><div className="range-tabs">{[["all","全部"],["info","信息"],["warning","警告"],["error","错误"]].map(([value,label]) => <button key={value} className={eventLevel === value ? "active" : ""} onClick={() => setEventLevel(value)}>{label}</button>)}</div><form className="event-search" onSubmit={event => { event.preventDefault(); loadEvents(); }}><MagnifyingGlass /><input value={eventQuery} onChange={event => setEventQuery(event.target.value)} placeholder="搜索事件" /></form></div><section className="panel event-list">{events.events.length ? events.events.map(item => <article className={`event-row ${item.level}`} key={item.id}><span className="event-level">{item.level === "error" ? "错误" : item.level === "warning" ? "警告" : "信息"}</span><div><strong>{item.title}</strong>{item.message && <p>{item.message}</p>}<time>{shanghaiDateTime(item.createdAt)}</time></div></article>) : <div className="event-empty">没有符合条件的事件</div>}</section></div>}
+    {tab === "devices" && <><section className="panel gateway-summary"><div><span>默认网关</span><strong>192.168.31.190</strong></div><div><span>透明 DNS</span><strong>198.18.0.2</strong></div><div><span>运行模式</span><strong>TUN + 显式代理</strong></div></section><section className="panel managed-devices"><div className="panel-heading"><h2>已识别设备</h2></div><div className="device-editor-head"><span>来源 IP</span><span>设备名称</span><span>接入方式</span><span>活跃连接</span><span>最后活动</span></div>{known.map(device => <div className="device-editor-row" key={device.ip}><code>{device.ip}</code><input disabled={!canManage} value={aliases[device.ip] ?? device.name ?? ""} onChange={event => setAliases(current => ({ ...current, [device.ip]: event.target.value }))} /><span className={`device-source ${device.sourceType || "unknown"}`}><i />{device.sourceType === "proxy" ? "显式代理" : device.sourceType === "gateway" ? "局域网网关" : "未知"}</span><span className={device.active ? "device-active" : "device-idle"}>{device.active || 0}</span><time>{device.active ? "正在活动" : shanghaiTime(device.lastSeen)}</time></div>)}</section></>}
+  </div>;
 }
 
 const DEMO_SUBSCRIPTIONS = {

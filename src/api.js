@@ -60,6 +60,11 @@ export const api = {
   },
   deviceAliases: () => request("/api/device-aliases"),
   saveDeviceAliases: (aliases) => request("/api/device-aliases", { method: "PUT", body: JSON.stringify({ aliases }) }),
+  gatewayRuntime: () => request("/api/gateway/runtime"),
+  gatewayEvents: ({ level = "all", query = "", limit = 200, offset = 0 } = {}) => {
+    const search = new URLSearchParams({ level, query, limit: String(limit), offset: String(offset) });
+    return request(`/api/gateway/events?${search}`);
+  },
   trafficAnalysis: ({ range, device, groupBy, metric, service, attributionPeriod }) => {
     const query = new URLSearchParams({ range, groupBy, metric });
     if (device) query.set("device", device);

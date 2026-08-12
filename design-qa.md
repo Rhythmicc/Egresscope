@@ -37,6 +37,42 @@ final result: passed
 
 ---
 
+# Gateway runtime and event history design QA
+
+## Visual truth and evidence
+
+- Runtime reference: `/tmp/codex-remote-attachments/019fef53-087b-7f20-a733-2428edcb4c5b/15D3128F-29C8-47D5-810A-AEEFE5D6F925/1-照片-1.jpg`.
+- Event reference: `/tmp/codex-remote-attachments/019fef53-087b-7f20-a733-2428edcb4c5b/15D3128F-29C8-47D5-810A-AEEFE5D6F925/2-照片-2.jpg`.
+- Final mobile runtime: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/gateway-runtime-mobile.png` (390 × 844 px).
+- Final mobile events: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/gateway-events-mobile.png` (390 × 844 px).
+- Combined runtime comparison: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/qa-runtime-comparison.png`.
+- Combined event comparison: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/qa-events-comparison.png`.
+- Desktop implementation: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/gateway-runtime-desktop.png` (1280 × 835 px).
+
+## Fidelity and integration checks
+
+- The reference hierarchy is preserved: start time and uptime lead, followed by access-method accounting and expandable exit/node rows with upload, download, current rate, and peak rate.
+- The existing Egresscope visual system remains authoritative. Dark surface tokens, blue/green operational state, compact borders, Phosphor icons, typography, and the safe-area-aware bottom navigation are reused instead of cloning the source application's black shell.
+- Runtime statistics, event history, and device naming are integrated as tabs within 网关设置, avoiding another primary navigation item.
+- The event list keeps the source's chronological scanability while adding meaningful severity filters and search. Titles, messages, badges, and Asia/Shanghai timestamps remain readable without relying on tiny annotation text.
+- Mobile width measures exactly 390 CSS px with no document-level horizontal overflow. Summary cards form a 2 × 2 grid; expandable metrics form a 2 × 2 detail grid; every tab and action target is at least 44 px high.
+
+## Interaction and runtime checks
+
+- Access and exit rows expand and collapse independently.
+- Runtime data refreshes automatically every five seconds and can be refreshed manually.
+- Event severity filters and keyword search issue real API requests; the refresh button reloads the current filter.
+- Demo data exercises both tabs locally, including gateway/proxy accounting, flagged node names, strategy changes, reconnects, timeouts, and connection failures.
+- Browser diagnostics contain no warning or error entries.
+
+## Remaining findings
+
+- No actionable P0, P1, or P2 visual issue remains in the tested desktop or phone states.
+
+final result: passed
+
+---
+
 # Responsive shell and mobile operations design QA
 
 ## Visual truth and evidence

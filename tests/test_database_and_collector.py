@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server.database import LATEST_SCHEMA_VERSION, connect, migrate
-from server.main import TrafficCollector, _connection_statistics, settings
+from server.main import TrafficCollector, _connection_statistics, _gateway_events, _record_gateway_event, settings
 
 
 class DatabaseMigrationTests(unittest.TestCase):
@@ -20,6 +20,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 self.assertIn("traffic_class_daily_rollups", tables)
                 self.assertIn("connection_sessions", tables)
+                self.assertIn("gateway_events", tables)
                 indexes = {row[1] for row in connection.execute("PRAGMA index_list(connection_sessions)")}
                 self.assertIn("idx_connection_sessions_seen", indexes)
 
@@ -80,6 +81,22 @@ class DatabaseMigrationTests(unittest.TestCase):
                 remaining = {row[0] for row in connection.execute("SELECT id FROM connection_sessions")}
             self.assertNotIn("expired", remaining)
             self.assertIn("recent", remaining)
+
+    def test_gateway_events_are_persistent_filterable_and_deduplicated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(settings, data_dir=data_dir, event_retention_days=90)
+            with connect(database) as connection:
+                migrate(connection)
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=1_786_400_000):
+                _record_gateway_event("error", "mihomo", "节点连接失败", "connection refused", event_key="same-event")
+                _record_gateway_event("error", "mihomo", "节点连接失败", "connection refused", event_key="same-event")
+                _record_gateway_event("info", "strategy", "策略已切换", "美国最佳 现在指向 node-a")
+                result = _gateway_events("error", "refused", 100, 0)
+            self.assertEqual(result["total"], 1)
+            self.assertEqual(result["events"][0]["title"], "节点连接失败")
+            self.assertEqual(result["retentionDays"], 90)
 
 
 if __name__ == "__main__":

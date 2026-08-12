@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import httpcore
+import websockets
 import yaml
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -54,6 +55,7 @@ class Settings:
     admin_password: str = _env("EGRESSCOPE_ADMIN_PASSWORD", "SSSLAB_ADMIN_PASSWORD")
     secure_cookie: bool = _env("EGRESSCOPE_SECURE_COOKIE", "SSSLAB_SECURE_COOKIE", "true").lower() == "true"
     retention_days: int = int(_env("EGRESSCOPE_AUDIT_RETENTION_DAYS", "SSSLAB_AUDIT_RETENTION_DAYS", "30"))
+    event_retention_days: int = int(_env("EGRESSCOPE_EVENT_RETENTION_DAYS", "SSSLAB_EVENT_RETENTION_DAYS", "90"))
     poll_interval: float = float(_env("EGRESSCOPE_POLL_INTERVAL", "SSSLAB_POLL_INTERVAL", "2"))
     device_aliases_path: Path = Path(_env("EGRESSCOPE_DEVICE_ALIASES", "SSSLAB_DEVICE_ALIASES", "/data/devices.json"))
     default_rule_sets_path: Path = Path(_env("EGRESSCOPE_DEFAULT_RULE_SETS", "SSSLAB_DEFAULT_RULE_SETS", str(Path(__file__).with_name("default-rule-sets.json"))))
@@ -129,6 +131,38 @@ def _record_audit(
         connection.execute(
             "INSERT INTO audit_log(actor_id,action,resource_type,resource_id,result,detail_json,created_at) VALUES(?,?,?,?,?,?,?)",
             (actor_id, action, resource_type, resource_id, result, json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")), int(time.time())),
+        )
+
+
+def _record_gateway_event(
+    level: str,
+    category: str,
+    title: str,
+    message: str = "",
+    detail: dict[str, Any] | None = None,
+    event_key: str | None = None,
+) -> None:
+    normalized_level = level if level in {"info", "warning", "error"} else "info"
+    now = int(time.time())
+    with _db() as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO gateway_events(event_key,level,category,title,message,detail_json,created_at)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (
+                event_key,
+                normalized_level,
+                category[:40],
+                title[:120],
+                message[:1200],
+                json.dumps(detail or {}, ensure_ascii=False, separators=(",", ":")),
+                now,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM gateway_events WHERE created_at < ?",
+            (now - max(1, settings.event_retention_days) * 86400,),
         )
 
 
@@ -1638,6 +1672,7 @@ class TrafficCollector:
         self.error: str | None = None
         self.version = "unknown"
         self.started = time.monotonic()
+        self.started_at = int(time.time())
         self.connections: list[dict[str, Any]] = []
         self.devices: list[dict[str, Any]] = []
         self.chains: list[dict[str, Any]] = []
@@ -1689,8 +1724,19 @@ class TrafficCollector:
             try:
                 await self.sample()
             except Exception as exc:  # a dead core must not kill the audit service
+                was_online = self.online
                 self.online = False
                 self.error = type(exc).__name__
+                if was_online:
+                    await asyncio.to_thread(
+                        _record_gateway_event,
+                        "error",
+                        "gateway",
+                        "网关连接中断",
+                        "控制面暂时无法读取 mihomo 状态，系统会继续自动重试。",
+                        {"error": type(exc).__name__},
+                        f"gateway-offline:{int(time.time()) // 60}",
+                    )
                 logger.exception("traffic collector sample failed")
             elapsed = time.monotonic() - before
             try:
@@ -1702,6 +1748,7 @@ class TrafficCollector:
         self._stop.set()
 
     async def sample(self) -> None:
+        was_online = self.online
         payload, version = await asyncio.gather(mihomo.get("/connections"), mihomo.get("/version"))
         sampled_at = time.monotonic()
         sampled_wall = time.time()
@@ -1818,6 +1865,16 @@ class TrafficCollector:
         self.version = version.get("version", "unknown")
         self.online = True
         self.error = None
+        if not was_online:
+            await asyncio.to_thread(
+                _record_gateway_event,
+                "info",
+                "gateway",
+                "网关已连接",
+                "mihomo 控制面和流量采集均已恢复。",
+                {"version": self.version},
+                f"gateway-online:{int(time.time()) // 60}",
+            )
 
         if sampled_at - self._last_persist >= 10:
             detail_rows = [(wall_time, device, service, host, exit_mode, values["up"], values["down"], values["connections"]) for (device, service, host, exit_mode), values in self._detail_pending.items()]
@@ -2173,6 +2230,143 @@ def _known_devices(user: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(inventory.values(), key=lambda item: (int(item.get("active") or 0) > 0, int(item.get("lastSeen") or 0)), reverse=True)
 
 
+def _runtime_exit_name(raw_chain: str | list[Any] | None) -> str:
+    if isinstance(raw_chain, list):
+        chain = [str(item) for item in raw_chain]
+    else:
+        try:
+            parsed = json.loads(str(raw_chain or "[]"))
+            chain = [str(item) for item in parsed] if isinstance(parsed, list) else [str(raw_chain or "")]
+        except (json.JSONDecodeError, TypeError):
+            chain = [str(raw_chain or "")]
+    cleaned = [_clean_name(item) for item in chain if item]
+    if "DIRECT" in cleaned:
+        return "DIRECT"
+    return cleaned[-1] if cleaned else "历史未细分"
+
+
+def _gateway_runtime() -> dict[str, Any]:
+    aliases = _aliases()
+    with _db() as connection:
+        access_rows = connection.execute(
+            """
+            SELECT device,SUM(up_bytes) up,SUM(down_bytes) down
+            FROM traffic_daily_rollups GROUP BY device
+            """
+        ).fetchall()
+        exit_rows = connection.execute(
+            """
+            SELECT chain,SUM(up_bytes) up,SUM(down_bytes) down
+            FROM traffic_flow_daily_rollups GROUP BY chain
+            """
+        ).fetchall()
+        peak_access_rows = connection.execute(
+            """
+            SELECT device,MAX(up_bytes * 1.0 / MAX(interval_seconds,1)) up_rate,
+                   MAX(down_bytes * 1.0 / MAX(interval_seconds,1)) down_rate
+            FROM traffic_samples GROUP BY device
+            """
+        ).fetchall()
+        peak_exit_rows = connection.execute(
+            """
+            SELECT chain,MAX(up_bytes / 10.0) up_rate,MAX(down_bytes / 10.0) down_rate
+            FROM traffic_flow_samples GROUP BY chain
+            """
+        ).fetchall()
+
+    access: dict[str, dict[str, Any]] = {
+        "gateway": {"id": "gateway", "name": "透明网关", "up": 0, "down": 0, "currentUpRate": 0, "currentDownRate": 0, "peakUpRate": 0, "peakDownRate": 0, "devices": set()},
+        "proxy": {"id": "proxy", "name": "显式代理", "up": 0, "down": 0, "currentUpRate": 0, "currentDownRate": 0, "peakUpRate": 0, "peakDownRate": 0, "devices": set()},
+        "unknown": {"id": "unknown", "name": "未识别来源", "up": 0, "down": 0, "currentUpRate": 0, "currentDownRate": 0, "peakUpRate": 0, "peakDownRate": 0, "devices": set()},
+    }
+    for row in access_rows:
+        device = str(row["device"])
+        source_type = "unknown" if device == "unknown" or _is_infrastructure_source(device) else _device_access_type(device)
+        target = access[source_type]
+        target["up"] += int(row["up"] or 0)
+        target["down"] += int(row["down"] or 0)
+        if device != "unknown" and not _is_infrastructure_source(device):
+            target["devices"].add(aliases.get(device, device))
+    for device in collector.devices:
+        address = str(device.get("ip") or "")
+        source_type = "unknown" if address == "unknown" or _is_infrastructure_source(address) else _device_access_type(address)
+        access[source_type]["currentUpRate"] += round(float(device.get("up") or 0))
+        access[source_type]["currentDownRate"] += round(float(device.get("down") or 0))
+    for row in peak_access_rows:
+        source_type = _device_access_type(str(row["device"]))
+        access[source_type]["peakUpRate"] = max(access[source_type]["peakUpRate"], round(float(row["up_rate"] or 0)))
+        access[source_type]["peakDownRate"] = max(access[source_type]["peakDownRate"], round(float(row["down_rate"] or 0)))
+
+    exits: dict[str, dict[str, Any]] = defaultdict(lambda: {"up": 0, "down": 0, "currentUpRate": 0, "currentDownRate": 0, "peakUpRate": 0, "peakDownRate": 0, "activeConnections": 0})
+    for row in exit_rows:
+        name = _runtime_exit_name(row["chain"])
+        exits[name]["up"] += int(row["up"] or 0)
+        exits[name]["down"] += int(row["down"] or 0)
+    for connection in collector.connections:
+        name = _runtime_exit_name(connection.get("chain"))
+        exits[name]["currentUpRate"] += int(connection.get("upRate") or 0)
+        exits[name]["currentDownRate"] += int(connection.get("downRate") or 0)
+        exits[name]["activeConnections"] += 1
+    for row in peak_exit_rows:
+        name = _runtime_exit_name(row["chain"])
+        exits[name]["peakUpRate"] = max(exits[name]["peakUpRate"], round(float(row["up_rate"] or 0)))
+        exits[name]["peakDownRate"] = max(exits[name]["peakDownRate"], round(float(row["down_rate"] or 0)))
+
+    access_items = []
+    for item in access.values():
+        item["devices"] = sorted(item["devices"])
+        item["total"] = item["up"] + item["down"]
+        if item["total"] or item["currentUpRate"] or item["currentDownRate"]:
+            access_items.append(item)
+    exit_items = []
+    for name, item in exits.items():
+        item.update({"name": name, "total": item["up"] + item["down"]})
+        exit_items.append(item)
+    exit_items.sort(key=lambda item: (item["total"], item["activeConnections"]), reverse=True)
+    uptime = max(0, int(time.time()) - collector.started_at)
+    return {
+        "startedAt": collector.started_at,
+        "uptimeSeconds": uptime,
+        "online": collector.online,
+        "version": collector.version,
+        "total": sum(item["total"] for item in access_items),
+        "access": access_items,
+        "exits": exit_items[:100],
+        "activeExits": sum(1 for item in exit_items if item["activeConnections"]),
+    }
+
+
+def _gateway_events(level: str, query: str, limit: int, offset: int) -> dict[str, Any]:
+    conditions: list[str] = []
+    parameters: list[Any] = []
+    if level != "all":
+        conditions.append("level = ?")
+        parameters.append(level)
+    if query:
+        conditions.append("(title LIKE ? OR message LIKE ? OR category LIKE ?)")
+        needle = f"%{query[:100]}%"
+        parameters.extend((needle, needle, needle))
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    with _db() as connection:
+        count = int(connection.execute(f"SELECT COUNT(*) FROM gateway_events {where}", parameters).fetchone()[0])
+        rows = connection.execute(
+            f"SELECT id,level,category,title,message,detail_json,created_at FROM gateway_events {where} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+            [*parameters, limit, offset],
+        ).fetchall()
+    return {
+        "events": [
+            {
+                "id": int(row["id"]), "level": str(row["level"]), "category": str(row["category"]),
+                "title": str(row["title"]), "message": str(row["message"]),
+                "detail": json.loads(row["detail_json"] or "{}"), "createdAt": int(row["created_at"]),
+            }
+            for row in rows
+        ],
+        "total": count,
+        "retentionDays": settings.event_retention_days,
+    }
+
+
 def _config_group_order() -> list[str]:
     try:
         payload = yaml.safe_load(settings.config_path.read_text()) or {}
@@ -2430,6 +2624,65 @@ async def _subscription_refresh_loop() -> None:
                 logger.exception("scheduled subscription refresh failed", extra={"subscription_id": subscription_id})
 
 
+def _mihomo_log_event(level: str, message: str) -> tuple[str, str] | None:
+    lowered = message.casefold()
+    meaningful = (
+        "connection refused", "timeout", "timed out", "network is unreachable", "no route to host",
+        "dns", "tun", "interface", "failed", "failure", "error", "fallback", "proxy changed",
+    )
+    normalized = "error" if level.casefold() == "error" else "warning" if level.casefold() in {"warning", "warn"} else "info"
+    if normalized == "info" and not any(token in lowered for token in meaningful):
+        return None
+    if "connection refused" in lowered or "no route to host" in lowered or "network is unreachable" in lowered:
+        title = "节点连接失败"
+    elif "timeout" in lowered or "timed out" in lowered:
+        title = "节点连接超时"
+    elif "dns" in lowered:
+        title = "DNS 状态变化"
+    elif "tun" in lowered or "interface" in lowered:
+        title = "网络接口状态变化"
+    else:
+        title = "mihomo 运行告警" if normalized != "info" else "mihomo 运行事件"
+    return normalized, title
+
+
+async def _mihomo_event_loop() -> None:
+    parsed = urlparse(settings.controller_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    path = parsed.path.rstrip("/")
+    endpoint = f"{scheme}://{parsed.netloc}{path}/logs?level=info"
+    headers = {"Authorization": f"Bearer {settings.controller_secret}"} if settings.controller_secret else None
+    while True:
+        try:
+            async with websockets.connect(endpoint, additional_headers=headers, open_timeout=8, close_timeout=5, ping_interval=20) as socket:
+                async for raw in socket:
+                    try:
+                        payload = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    level = str(payload.get("type") or "info")
+                    message = str(payload.get("payload") or "").strip()
+                    classified = _mihomo_log_event(level, message)
+                    if not message or not classified:
+                        continue
+                    normalized, title = classified
+                    digest = hashlib.sha256(f"{normalized}:{message}".encode()).hexdigest()[:16]
+                    await asyncio.to_thread(
+                        _record_gateway_event,
+                        normalized,
+                        "mihomo",
+                        title,
+                        message,
+                        {},
+                        f"mihomo:{digest}:{int(time.time()) // 30}",
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("mihomo event stream disconnected", exc_info=True)
+            await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if not settings.controller_secret and not settings.allow_insecure_controller:
@@ -2440,15 +2693,19 @@ async def lifespan(_: FastAPI):
     task = asyncio.create_task(collector.run())
     restore_task = asyncio.create_task(rule_workspace.restore_if_applied())
     subscription_task = asyncio.create_task(_subscription_refresh_loop())
+    event_task = asyncio.create_task(_mihomo_event_loop())
+    await asyncio.to_thread(_record_gateway_event, "info", "system", "Egresscope 已启动", "运行统计与事件采集已开始。", {"version": "0.2.0"})
     try:
         yield
     finally:
         collector.stop()
         await task
         subscription_task.cancel()
+        event_task.cancel()
         if not restore_task.done():
             restore_task.cancel()
-        await asyncio.gather(restore_task, subscription_task, return_exceptions=True)
+        await asyncio.gather(restore_task, subscription_task, event_task, return_exceptions=True)
+        await asyncio.to_thread(_record_gateway_event, "info", "system", "Egresscope 已停止", "事件采集已安全结束。")
         await mihomo.close()
 
 
@@ -2842,6 +3099,22 @@ async def device_aliases(user: dict[str, Any] = Depends(admin_user)) -> dict[str
         allowed = set(user.get("allowedDevices") or [])
         aliases = {address: label for address, label in aliases.items() if address in allowed}
     return {"aliases": aliases, "devices": await asyncio.to_thread(_known_devices, user)}
+
+
+@app.get("/api/gateway/runtime")
+async def gateway_runtime(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    return await asyncio.to_thread(_gateway_runtime)
+
+
+@app.get("/api/gateway/events")
+async def gateway_events(
+    level: str = Query(default="all", pattern="^(all|info|warning|error)$"),
+    query: str = Query(default="", max_length=100),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _: dict[str, Any] = Depends(admin_user),
+) -> dict[str, Any]:
+    return await asyncio.to_thread(_gateway_events, level, query.strip(), limit, offset)
 
 
 @app.put("/api/device-aliases")
@@ -3335,6 +3608,14 @@ async def select_strategy(group_name: str, request: StrategySelectRequest, user:
     closed = failed = 0
     if affected_ids:
         closed, failed = await mihomo.close_connections(affected_ids)
+    await asyncio.to_thread(
+        _record_gateway_event,
+        "info",
+        "strategy",
+        "策略已切换",
+        f"{_clean_name(group_name)} 现在指向 {_clean_name(request.name)}",
+        {"group": group_name, "selected": request.name, "closedConnections": closed},
+    )
     return {"ok": True, "group": group_name, "selected": request.name, "reconnect": request.reconnect, "affectedConnections": len(affected_ids), "closedConnections": closed, "closeFailures": failed, "snapshotAvailable": snapshot_available, "elapsedMs": round((time.monotonic() - started) * 1000)}
 
 
@@ -3434,9 +3715,11 @@ async def delete_custom_rule(rule_id: str, _: dict[str, Any] = Depends(admin_use
 
 
 @app.post("/api/rules/apply")
-async def apply_rules(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+async def apply_rules(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     try:
-        return await rule_workspace.apply()
+        result = await rule_workspace.apply()
+        await asyncio.to_thread(_record_gateway_event, "info", "rules", "分流规则已应用", "新的规则顺序已热重载到 mihomo。", {"actorId": admin["id"]})
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
