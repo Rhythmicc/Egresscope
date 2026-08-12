@@ -669,6 +669,7 @@ def _overlay_subscription_nodes(config: dict[str, Any], nodes: list[dict[str, An
 
 
 DELIVERY_TEST_URL = "https://www.gstatic.com/generate_204"
+SURGE_DELIVERY_TEST_URL = "http://www.gstatic.com/generate_204"
 
 
 def _delivery_regions(nodes: list[dict[str, Any]]) -> list[tuple[str, list[str]]]:
@@ -801,8 +802,8 @@ def _surge_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
         group_lines.extend(
             [
                 f"{region}策略 = select, {region}最佳, {region}智能, 手动选择",
-                f"{region}最佳 = url-test, {', '.join(members)}, url={DELIVERY_TEST_URL}, interval=300, tolerance=80, timeout=5",
-                f"{region}智能 = load-balance, {', '.join(members)}, url={DELIVERY_TEST_URL}, interval=300, timeout=5, persistent=true",
+                f"{region}最佳 = url-test, {', '.join(members)}, url={SURGE_DELIVERY_TEST_URL}, interval=300, tolerance=80, timeout=5",
+                f"{region}智能 = load-balance, {', '.join(members)}, url={SURGE_DELIVERY_TEST_URL}, interval=300, timeout=5, persistent=true",
             ]
         )
     return "\n".join(
@@ -812,8 +813,6 @@ def _surge_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
             "[General]",
             "loglevel = notify",
             "dns-server = system, 119.29.29.29, 223.5.5.5",
-            f"proxy-test-url = {DELIVERY_TEST_URL}",
-            "internet-test-url = http://wifi.vivo.com.cn/generate_204",
             "ipv6 = false",
             "",
             "[Proxy]",

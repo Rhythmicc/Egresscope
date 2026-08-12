@@ -91,7 +91,10 @@ proxies:
         self.assertIn("[Proxy]", profile)
         self.assertIn("🇺🇸 US A = anytls, us.example.com, 443, password=secret", profile)
         self.assertIn("美国智能 = load-balance", profile)
+        self.assertIn("url=http://www.gstatic.com/generate_204", profile)
         self.assertIn("persistent=true", profile)
+        self.assertNotIn("proxy-test-url", profile)
+        self.assertNotIn("internet-test-url", profile)
         self.assertTrue(profile.rstrip().endswith("FINAL,节点选择"))
 
 
