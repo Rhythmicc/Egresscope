@@ -49,6 +49,8 @@ docker compose up -d --build
 
 `EGRESSCOPE_SECURE_COOKIE` 默认 `true`，时区默认 `Asia/Shanghai`，明细保留期默认
 14 天。月度和年度汇总不会随明细清理。设备别名格式见 `devices.example.json`。
+若 mihomo 配置目录限制了宿主机组权限，将 `MIHOMO_CONFIG_GID` 设为可读取该目录
+的 GID；面板只需读取配置，不应获得写权限。
 
 ## 开发和验证
 

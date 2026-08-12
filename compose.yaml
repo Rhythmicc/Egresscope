@@ -30,6 +30,8 @@ services:
     image: egresscope:local
     container_name: egresscope
     network_mode: host
+    group_add:
+      - ${MIHOMO_CONFIG_GID:-10001}
     environment:
       EGRESSCOPE_SESSION_SECRET: ${EGRESSCOPE_SESSION_SECRET:?set EGRESSCOPE_SESSION_SECRET in .env}
       EGRESSCOPE_ADMIN_USERNAME: ${EGRESSCOPE_ADMIN_USERNAME:-admin}
