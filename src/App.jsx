@@ -10,6 +10,7 @@ import {
   CloudArrowDown,
   Copy,
   Cpu,
+  DotsThreeVertical,
   Desktop,
   DownloadSimple,
   FileCode,
@@ -28,6 +29,7 @@ import {
   Moon,
   OpenAiLogo,
   Pause,
+  PencilSimple,
   PlugsConnected,
   Plus,
   Power,
@@ -830,7 +832,16 @@ function GatewayPage({ canManage }) {
   return <div className="page-content gateway-page"><div className="strategy-intro"><h2>网关与代理设备</h2>{canManage && <button className="primary-button" onClick={save}><CheckCircle /> 保存设备名称</button>}</div>{message && <div className="inline-message">{message}</div>}<section className="panel gateway-summary"><div><span>默认网关</span><strong>192.168.31.190</strong></div><div><span>透明 DNS</span><strong>198.18.0.2</strong></div><div><span>运行模式</span><strong>TUN + 显式代理</strong></div></section><section className="panel managed-devices"><div className="panel-heading"><h2>已识别设备</h2></div><div className="device-editor-head"><span>来源 IP</span><span>设备名称</span><span>接入方式</span><span>活跃连接</span><span>最后活动</span></div>{known.map(device => <div className="device-editor-row" key={device.ip}><code>{device.ip}</code><input disabled={!canManage} value={aliases[device.ip] ?? device.name ?? ""} onChange={event => setAliases(current => ({ ...current, [device.ip]: event.target.value }))} /><span className={`device-source ${device.sourceType || "unknown"}`}><i />{device.sourceType === "proxy" ? "显式代理" : device.sourceType === "gateway" ? "局域网网关" : "未知"}</span><span className={device.active ? "device-active" : "device-idle"}>{device.active || 0}</span><time>{device.active ? "正在活动" : shanghaiTime(device.lastSeen)}</time></div>)}</section></div>;
 }
 
-const refreshInterval = (seconds) => seconds < 86400 ? `${Math.round(seconds / 3600)} 小时` : `${Math.round(seconds / 86400)} 天`;
+const DEMO_SUBSCRIPTIONS = {
+  subscriptions: [{
+    id: "demo-g94", owner: "demo", name: "G94Cloud", maskedUrl: "https://www.g94cloud.com/••••",
+    interval: 21600, enabled: true, gatewayEnabled: true, sourceFormat: "surge", nodeCount: 16,
+    usage: { upload: 31 * 1024 ** 3, download: 202 * 1024 ** 3, total: 687 * 1024 ** 3, expire: Date.parse("2026-08-31T21:48:00+08:00") / 1000 },
+    fetchedAt: Date.parse("2026-08-12T23:15:00+08:00") / 1000, lastError: null,
+    deliveryPaths: { surge: "#demo-surge", clash: "#demo-clash" },
+  }],
+  summary: { count: 1, nodes: 16, healthy: 1, gateway: "G94Cloud" },
+};
 
 function SubscriptionsPage({ user }) {
   const [data, setData] = useState({ subscriptions: [], summary: { count: 0, nodes: 0, healthy: 0, gateway: null } });
@@ -838,14 +849,27 @@ function SubscriptionsPage({ user }) {
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState(false);
+  const [openMenu, setOpenMenu] = useState("");
   const load = async () => {
     try { setData(await api.subscriptions()); setError(false); }
     catch (caught) {
-      if (DEMO_MODE) { setData({ subscriptions: [], summary: { count: 0, nodes: 0, healthy: 0, gateway: null } }); setMessage(""); setError(false); }
+      if (DEMO_MODE) { setData(DEMO_SUBSCRIPTIONS); setMessage(""); setError(false); }
       else { setMessage(caught.message); setError(true); }
     }
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const closeMenu = event => {
+      if (!event.target.closest(".subscription-menu")) setOpenMenu("");
+    };
+    const closeOnEscape = event => { if (event.key === "Escape") setOpenMenu(""); };
+    document.addEventListener("pointerdown", closeMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, []);
   const run = async (key, action, success) => {
     setBusy(key); setMessage(""); setError(false);
     try { const result = await action(); await load(); setMessage(typeof success === "function" ? success(result) : success); return true; }
@@ -877,14 +901,24 @@ function SubscriptionsPage({ user }) {
         const total = Number(item.usage?.total || 0);
         const percent = total ? Math.min(100, used / total * 100) : 0;
         return <article className={`subscription-card ${item.gatewayEnabled ? "is-gateway" : ""}`} key={item.id}>
-          <div className="subscription-source"><span className={`subscription-health ${item.lastError ? "failed" : item.fetchedAt ? "healthy" : "pending"}`}><CloudArrowDown weight="fill" /></span><div><div className="subscription-title"><h3>{item.name}</h3>{item.gatewayEnabled && <b>网关节点源</b>}{user?.role === "admin" && item.owner !== user.username && <em>{item.owner}</em>}</div><p>{item.maskedUrl} · {item.sourceFormat ? item.sourceFormat.toUpperCase() : "待识别"}</p></div></div>
-          <div className="subscription-state"><span>节点</span><strong>{item.nodeCount || 0}</strong><small>{item.lastError ? "刷新失败" : `更新于 ${shanghaiTime(item.fetchedAt)}`}</small></div>
-          <div className="subscription-quota"><div><span>订阅用量</span><b>{total ? `${bytes(used)} / ${bytes(total)}` : "来源未提供"}</b></div><i><u style={{ width: `${percent}%` }} /></i><small>{item.usage?.expire ? `到期 ${shanghaiTime(item.usage.expire)}` : `每 ${refreshInterval(item.interval)}刷新`}</small></div>
-          <div className="subscription-deliveries" aria-label={`${item.name} 配置链接`}>
-            <div className="subscription-delivery"><AppleLogo weight="fill" /><div><span>Surge 配置</span><small>完整托管配置 · .conf</small></div><a title="打开 Surge 配置" href={item.deliveryPaths?.surge} target="_blank" rel="noreferrer"><DownloadSimple /></a><button title="复制 Surge 配置链接" onClick={() => copyDelivery(item, "surge")}><Copy /></button></div>
-            <div className="subscription-delivery"><FileCode weight="fill" /><div><span>Clash / Mihomo</span><small>完整客户端配置 · YAML</small></div><a title="打开 Clash/Mihomo 配置" href={item.deliveryPaths?.clash} target="_blank" rel="noreferrer"><DownloadSimple /></a><button title="复制 Clash/Mihomo 配置链接" onClick={() => copyDelivery(item, "clash")}><Copy /></button></div>
+          <div className="subscription-card-toolbar">
+            {user?.role === "admin" ? <button className={`subscription-gateway-status ${item.gatewayEnabled ? "active" : ""}`} disabled={Boolean(busy) || (!item.gatewayEnabled && !item.nodeCount)} onClick={() => run(`gateway-${item.id}`, () => item.gatewayEnabled ? api.deactivateSubscription(item.id) : api.activateSubscription(item.id), item.gatewayEnabled ? "已停用订阅覆盖，网关恢复基础节点配置。" : "订阅已成为网关节点源，并已热重载。") }><span />{item.gatewayEnabled ? "网关使用中" : "用于网关"}</button> : <span className={`subscription-gateway-status ${item.gatewayEnabled ? "active" : ""}`}><span />{item.gatewayEnabled ? "网关使用中" : "个人订阅"}</span>}
+            <div className="subscription-menu">
+              <button className="subscription-menu-trigger" aria-label={`管理 ${item.name}`} aria-expanded={openMenu === item.id} onClick={event => { event.stopPropagation(); setOpenMenu(current => current === item.id ? "" : item.id); }}><DotsThreeVertical weight="bold" /></button>
+              {openMenu === item.id && <div className="subscription-menu-popover" role="menu">
+                <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); run(item.id, () => api.refreshSubscription(item.id), "订阅已刷新；节点库存与状态已更新。"); }}><ArrowClockwise className={busy === item.id ? "spinning" : ""} />立即刷新</button>
+                <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); setEditor({ id: item.id, name: item.name, url: "", interval: item.interval, enabled: item.enabled }); }}><PencilSimple />编辑订阅</button>
+                <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); if (confirm(`轮换「${item.name}」的交付链接？旧链接会立即失效。`)) run(`rotate-${item.id}`, () => api.rotateSubscriptionToken(item.id), "交付链接已轮换，旧链接已失效。"); }}><LinkSimple />轮换交付链接</button>
+                <button role="menuitem" className="danger" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); if (confirm(`删除订阅「${item.name}」？交付地址将立即失效。`)) run(`delete-${item.id}`, () => api.deleteSubscription(item.id), "订阅已删除。"); }}><Trash />删除订阅</button>
+              </div>}
+            </div>
           </div>
-          <div className="subscription-actions"><button disabled={Boolean(busy)} title="立即刷新" onClick={() => run(item.id, () => api.refreshSubscription(item.id), "订阅已刷新；节点库存与状态已更新。") }><ArrowClockwise className={busy === item.id ? "spinning" : ""} /></button><button disabled={Boolean(busy)} onClick={() => setEditor({ id: item.id, name: item.name, url: "", interval: item.interval, enabled: item.enabled })}>编辑</button><button disabled={Boolean(busy)} title="让旧交付链接立即失效" onClick={() => confirm(`轮换「${item.name}」的交付链接？旧链接会立即失效。`) && run(`rotate-${item.id}`, () => api.rotateSubscriptionToken(item.id), "交付链接已轮换，旧链接已失效。")}>换链接</button>{user?.role === "admin" && (item.gatewayEnabled ? <button className="gateway-action active" disabled={Boolean(busy)} onClick={() => run(`gateway-${item.id}`, () => api.deactivateSubscription(item.id), "已停用订阅覆盖，网关恢复基础节点配置。") }><Power /> 停用</button> : <button className="gateway-action" disabled={Boolean(busy) || !item.nodeCount} onClick={() => run(`gateway-${item.id}`, () => api.activateSubscription(item.id), "订阅已成为网关节点源，并已热重载。") }><Power /> 用于网关</button>)}<button className="danger-link" disabled={Boolean(busy)} title="删除" onClick={() => confirm(`删除订阅「${item.name}」？交付地址将立即失效。`) && run(`delete-${item.id}`, () => api.deleteSubscription(item.id), "订阅已删除。") }><Trash /></button></div>
+          <div className="subscription-source"><span className={`subscription-health ${item.lastError ? "failed" : item.fetchedAt ? "healthy" : "pending"}`}><CloudArrowDown weight="fill" /></span><div><div className="subscription-title"><h3>{item.name}</h3>{item.gatewayEnabled && <b>网关节点源</b>}{user?.role === "admin" && item.owner !== user.username && <em>{item.owner}</em>}</div><p>{item.maskedUrl}</p><div className="subscription-node-count"><HardDrives /><strong>{item.nodeCount || 0}</strong><span>个节点</span>{item.lastError && <b>刷新失败</b>}</div></div></div>
+          <div className="subscription-quota"><div className="subscription-quota-value"><strong>{total ? bytes(used) : "—"}</strong><span>{total ? `已用 / ${bytes(total)}` : "来源未提供配额"}</span></div><i><u style={{ width: `${percent}%` }} /></i>{total > 0 && <b>{percent.toFixed(1)}%</b>}<div className="subscription-lifecycle"><span><b>到期时间</b><time>{item.usage?.expire ? shanghaiTime(item.usage.expire) : "未提供"}</time></span><span><b>更新时间</b><time>{item.lastError ? "刷新失败" : shanghaiTime(item.fetchedAt)}</time></span></div></div>
+          <div className="subscription-deliveries" aria-label={`${item.name} 配置链接`}>
+            <div className="subscription-delivery"><AppleLogo weight="fill" /><span>Surge 配置</span><button title="复制 Surge 配置链接" onClick={() => copyDelivery(item, "surge")}><Copy /></button><a title="打开 Surge 配置" href={item.deliveryPaths?.surge} target="_blank" rel="noreferrer"><DownloadSimple /></a></div>
+            <div className="subscription-delivery"><FileCode weight="fill" /><span>Clash / Mihomo</span><button title="复制 Clash/Mihomo 配置链接" onClick={() => copyDelivery(item, "clash")}><Copy /></button><a title="打开 Clash/Mihomo 配置" href={item.deliveryPaths?.clash} target="_blank" rel="noreferrer"><DownloadSimple /></a></div>
+          </div>
           {item.lastError && <div className="subscription-error"><WarningCircle />{item.lastError}</div>}
         </article>;
       })}</div> : <div className="subscription-empty"><CloudArrowDown /><h3>还没有订阅</h3><p>添加节点来源后，可定时刷新、生成隔离交付地址；管理员还可以把它设为网关节点源。</p><button className="primary-button" onClick={() => setEditor({ name: "", url: "", interval: 21600, enabled: true })}>添加第一个订阅</button></div>}

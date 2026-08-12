@@ -634,48 +634,63 @@ body { font-size: 14px; }
 .subscription-panel-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .subscription-panel-head .filter-button { height: 36px; display: inline-flex; align-items: center; gap: 7px; }
 .subscription-list { display: grid; }
-.subscription-card { position: relative; min-height: 108px; display: grid; grid-template-columns: minmax(240px, 1.15fr) 110px minmax(190px, .78fr) minmax(430px, 1.65fr) minmax(230px, auto); align-items: center; gap: 14px; padding: 17px; border-bottom: 1px solid var(--grid); transition: background .15s; }
+.subscription-card { position: relative; min-height: 164px; display: grid; grid-template-columns: minmax(230px, .9fr) minmax(290px, 1fr) minmax(250px, .86fr); align-items: center; gap: 0; padding: 50px 18px 16px; border-bottom: 1px solid var(--grid); background: var(--surface); transition: background .15s; }
 .subscription-card:last-child { border-bottom: 0; }
 .subscription-card:hover { background: color-mix(in srgb, var(--surface-hover) 66%, var(--surface)); }
-.subscription-card.is-gateway { background: color-mix(in srgb, var(--primary-soft) 27%, var(--surface)); box-shadow: inset 3px 0 var(--primary); }
-.subscription-source { min-width: 0; display: flex; align-items: center; gap: 12px; }
-.subscription-source > div, .subscription-state, .subscription-quota { min-width: 0; }
-.subscription-health { width: 39px; height: 39px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; background: var(--surface-subtle); color: var(--faint); font-size: 20px; }
+.subscription-card.is-gateway { background: color-mix(in srgb, var(--primary-soft) 18%, var(--surface)); box-shadow: inset 3px 0 var(--primary); }
+.subscription-card-toolbar { position: absolute; inset: 11px 14px auto auto; z-index: 3; display: flex; align-items: center; gap: 7px; }
+.subscription-gateway-status { height: 34px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); color: var(--muted); font-size: 12px; font-weight: 650; white-space: nowrap; }
+button.subscription-gateway-status { cursor: pointer; }
+button.subscription-gateway-status:hover { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); color: var(--primary); }
+.subscription-gateway-status.active { border-color: color-mix(in srgb, var(--green) 26%, var(--border)); background: color-mix(in srgb, var(--green-soft) 58%, var(--surface)); color: var(--green); }
+.subscription-gateway-status > span { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 10%, transparent); }
+.subscription-menu { position: relative; }
+.subscription-menu-trigger { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--muted); cursor: pointer; }
+.subscription-menu-trigger:hover, .subscription-menu-trigger[aria-expanded="true"] { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); background: var(--primary-soft); color: var(--primary); }
+.subscription-menu-trigger svg { font-size: 18px; }
+.subscription-menu-popover { position: absolute; top: calc(100% + 7px); right: 0; width: 190px; padding: 6px; display: grid; gap: 2px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 16px 38px rgba(0, 0, 0, .34); }
+.subscription-menu-popover button { height: 36px; padding: 0 10px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 7px; background: transparent; color: var(--text); cursor: pointer; font-size: 13px; text-align: left; }
+.subscription-menu-popover button:hover { background: var(--surface-hover); color: var(--primary); }
+.subscription-menu-popover button.danger { color: var(--red); }
+.subscription-menu-popover button.danger::before { content: ""; position: absolute; left: 6px; right: 6px; margin-top: -44px; border-top: 1px solid var(--grid); }
+.subscription-menu-popover button:disabled { opacity: .45; cursor: default; }
+.subscription-menu-popover svg { flex: 0 0 auto; font-size: 17px; }
+.subscription-source { min-width: 0; display: flex; align-items: center; gap: 13px; padding-right: 20px; }
+.subscription-source > div, .subscription-quota { min-width: 0; }
+.subscription-health { width: 52px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 13px; background: var(--surface-subtle); color: var(--faint); font-size: 25px; }
 .subscription-health.healthy { background: var(--green-soft); color: var(--green); }
 .subscription-health.failed { background: color-mix(in srgb, var(--red) 10%, var(--surface)); color: var(--red); }
-.subscription-title { min-width: 0; display: flex; align-items: center; gap: 7px; }
-.subscription-title h3 { max-width: 210px; margin: 0; overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
-.subscription-title b, .subscription-title em { padding: 3px 6px; border-radius: 5px; font-size: 9px; font-style: normal; white-space: nowrap; }
+.subscription-title { min-width: 0; display: flex; align-items: center; gap: 9px; }
+.subscription-title h3 { max-width: 220px; margin: 0; overflow: hidden; font-size: 18px; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-title b, .subscription-title em { padding: 4px 7px; border-radius: 6px; font-size: 11px; font-style: normal; white-space: nowrap; }
 .subscription-title b { background: var(--primary-soft); color: var(--primary); }
 .subscription-title em { background: var(--surface-subtle); color: var(--muted); }
-.subscription-source p { margin: 5px 0 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.subscription-state span, .subscription-state small, .subscription-quota span, .subscription-quota small { display: block; color: var(--muted); font-size: 10px; }
-.subscription-state small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subscription-state strong { display: block; margin: 3px 0; font-size: 20px; }
-.subscription-quota > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.subscription-quota b { font-size: 10px; white-space: nowrap; }
-.subscription-quota > i { height: 5px; display: block; margin: 9px 0 6px; overflow: hidden; border-radius: 5px; background: var(--surface-subtle); }
+.subscription-source p { max-width: 310px; margin: 5px 0 0; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-node-count { margin-top: 9px; display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.subscription-node-count svg { color: var(--primary); font-size: 18px; }
+.subscription-node-count strong { color: var(--text); font-size: 16px; }
+.subscription-node-count span { font-size: 12px; }
+.subscription-node-count b { margin-left: 5px; color: var(--red); font-size: 12px; }
+.subscription-quota { position: relative; min-height: 92px; padding: 2px 22px; border-inline: 1px solid var(--grid); }
+.subscription-quota-value { display: flex; align-items: baseline; gap: 7px; }
+.subscription-quota-value strong { font-size: 19px; letter-spacing: -.015em; }
+.subscription-quota-value span { color: var(--muted); font-size: 15px; }
+.subscription-quota > i { height: 6px; display: block; margin: 10px 42px 11px 0; overflow: hidden; border-radius: 6px; background: var(--surface-subtle); }
 .subscription-quota > i > u { height: 100%; display: block; border-radius: inherit; background: var(--primary); text-decoration: none; }
-.subscription-deliveries { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
-.subscription-delivery { min-width: 0; min-height: 50px; display: flex; align-items: center; gap: 8px; padding: 7px 7px 7px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); transition: border-color .15s, background .15s, transform .15s; }
-.subscription-delivery:hover { border-color: color-mix(in srgb, var(--primary) 38%, var(--border)); background: color-mix(in srgb, var(--primary-soft) 22%, var(--surface)); transform: translateY(-1px); }
+.subscription-quota > b { position: absolute; top: 36px; right: 22px; color: var(--primary); font-size: 12px; }
+.subscription-lifecycle { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.subscription-lifecycle span { display: grid; gap: 2px; }
+.subscription-lifecycle b { color: var(--muted); font-size: 11px; font-weight: 600; }
+.subscription-lifecycle time { color: var(--text); font-size: 13px; }
+.subscription-deliveries { min-width: 0; padding-left: 22px; display: grid; gap: 7px; }
+.subscription-delivery { min-width: 0; min-height: 42px; display: flex; align-items: center; gap: 9px; padding: 4px 6px 4px 11px; border: 1px solid var(--border); border-radius: 9px; background: color-mix(in srgb, var(--surface-subtle) 42%, transparent); transition: border-color .15s, background .15s; }
+.subscription-delivery:hover { border-color: color-mix(in srgb, var(--primary) 38%, var(--border)); background: color-mix(in srgb, var(--primary-soft) 20%, var(--surface)); }
 .subscription-delivery > svg { flex: 0 0 auto; color: var(--primary); font-size: 18px; }
-.subscription-delivery > div { min-width: 0; flex: 1; }
-.subscription-delivery span, .subscription-delivery small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subscription-delivery span { font-size: 11px; font-weight: 700; }
-.subscription-delivery small { margin-top: 3px; color: var(--muted); font-size: 8.5px; }
-.subscription-delivery button, .subscription-delivery a { width: 27px; height: 27px; display: grid; place-items: center; flex: 0 0 auto; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; text-decoration: none; }
-.subscription-delivery button { margin-left: -5px; }
+.subscription-delivery > span { min-width: 0; flex: 1; overflow: hidden; font-size: 14px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.subscription-delivery button, .subscription-delivery a { width: 30px; height: 30px; display: grid; place-items: center; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; text-decoration: none; }
 .subscription-delivery button:hover, .subscription-delivery a:hover { background: var(--primary-soft); color: var(--primary); }
 .subscription-delivery button svg, .subscription-delivery a svg { font-size: 15px; }
-.subscription-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
-.subscription-actions button { min-width: 31px; height: 31px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: 10px; font-weight: 600; white-space: nowrap; }
-.subscription-actions button:hover { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); color: var(--primary); }
-.subscription-actions button:disabled { opacity: .45; cursor: default; }
-.subscription-actions .gateway-action { color: var(--primary); }
-.subscription-actions .gateway-action.active { border-color: color-mix(in srgb, var(--green) 35%, var(--border)); color: var(--green); }
-.subscription-actions .danger-link { color: var(--red); }
-.subscription-error { grid-column: 1 / -1; min-height: 30px; margin-top: -5px; padding: 7px 9px; display: flex; align-items: center; gap: 7px; border-radius: 7px; background: color-mix(in srgb, var(--red) 8%, var(--surface)); color: var(--red); font-size: 10px; }
+.subscription-error { grid-column: 1 / -1; min-height: 34px; margin: 18px 0 -7px; padding: 8px 10px; display: flex; align-items: center; gap: 8px; border-radius: 8px; background: color-mix(in srgb, var(--red) 8%, var(--surface)); color: var(--red); font-size: 12px; }
 .subscription-empty { min-height: 310px; display: grid; place-items: center; align-content: center; gap: 8px; text-align: center; }
 .subscription-empty > svg { font-size: 44px; color: var(--primary); }
 .subscription-empty h3 { margin: 4px 0 0; font-size: 17px; }
@@ -687,23 +702,23 @@ body { font-size: 14px; }
 .spinning { animation: subscription-spin .8s linear infinite; }
 @keyframes subscription-spin { to { transform: rotate(360deg); } }
 
-@media (max-width: 1380px) {
-  .subscription-card { grid-template-columns: minmax(220px, 1.1fr) 110px minmax(180px, .8fr) minmax(400px, 1.5fr); }
-  .subscription-actions { grid-column: 1 / -1; justify-content: flex-end; margin-top: -8px; }
-}
-
 @media (max-width: 1050px) {
-  .subscription-card { grid-template-columns: minmax(220px, 1fr) 110px minmax(190px, .8fr); }
-  .subscription-deliveries { grid-column: 1 / -1; }
+  .subscription-card { grid-template-columns: 1fr; }
+  .subscription-source { padding-right: 0; }
+  .subscription-quota { min-height: 0; margin-block: 16px; padding: 16px 0; border-inline: 0; border-block: 1px solid var(--grid); }
+  .subscription-quota > b { top: 49px; right: 0; }
+  .subscription-deliveries { padding-left: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 720px) {
   .subscriptions-page { padding-inline: 14px; }
   .subscriptions-hero { align-items: stretch; flex-direction: column; }
   .subscription-stats { grid-template-columns: repeat(2, 1fr); }
-  .subscription-card { grid-template-columns: minmax(0, 1fr) 104px; gap: 12px; }
-  .subscription-quota { grid-column: 1 / -1; }
+  .subscription-card { min-height: 0; padding: 58px 16px 16px; }
+  .subscription-title { flex-wrap: wrap; }
+  .subscription-health { width: 52px; height: 52px; font-size: 25px; }
   .subscription-deliveries { grid-template-columns: 1fr; }
+  .subscription-lifecycle { gap: 10px; }
 }
 
 /* Readability scale v2: use the console's existing whitespace for larger type. */
@@ -767,10 +782,4 @@ body { font-size: 15px; }
 .rule-set-row, .rule-set-name strong { font-size: 13px; }
 
 .subscription-stats span, .subscription-stats small,
-.subscription-panel-head p, .subscription-source p,
-.subscription-state span, .subscription-state small,
-.subscription-quota span, .subscription-quota small,
-.subscription-quota b, .subscription-delivery small,
-.subscription-actions button, .subscription-error { font-size: 11px; }
-.subscription-title b, .subscription-title em { font-size: 10px; }
-.subscription-title h3, .subscription-delivery span { font-size: 13px; }
+.subscription-panel-head p { font-size: 12px; }

@@ -1,48 +1,36 @@
-**Source visual truth**
+# Subscription inventory design QA
 
-- `/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-58696a15-52b0-4a06-bdd0-516e88e5f7da.png`
-- Source pixels: 298 × 1746. It is the rejected production state: a narrow terminal action column repeats `终止` and exposes clipped ellipses.
+## Visual truth and evidence
 
-**Implementation evidence**
+- Selected design: `/Users/lianhaocheng/.codex/generated_images/019fef53-087b-7f20-a733-2428edcb4c5b/exec-70d6e5ff-68d5-42b1-b006-ddfa5ef17d91.png` (2012 × 781 px).
+- Final implementation: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/subscriptions-option-2-compact-final.jpg` (1280 × 720 px).
+- Side-by-side comparison: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/subscriptions-option-2-comparison-final.jpg` (1800 × 500 px).
+- Browser state: dark theme, subscription inventory, one healthy gateway source, menu closed; default viewport 1280 × 720 CSS px.
 
-- `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/device-target-trace-production-final.png`
-- `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/connections-production-right-columns.png`
-- Combined comparison: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/connection-tracing-design-qa-comparison-final.png`
-- Browser viewport: 1512 × 1074 CSS px; production dark theme; browser screenshot output: 1512 × 1074 px.
-- Comparison normalization: the 298 × 1746 source crop and 1512 × 1074 implementation capture were independently scaled to 900 px height and placed in one comparison image. The source is a focused before-state crop rather than a full screen, so exact frame proportions are intentionally not compared.
-- State: 实时连接 → row detail → ssslab-login-1 device history → 实时 target trace.
+## Iteration history
 
-**Findings**
+- Pass 1 reproduced the chosen option 2 hierarchy, but the 1380 px breakpoint moved delivery links to a second row at a normal 1280 px viewport. The resulting card measured 276 px tall and had excessive vertical whitespace (P2).
+- Pass 2 keeps three columns at desktop widths, reduces the card padding and secondary control sizes, and preserves the same source, quota, lifecycle, and delivery information. The final card measures 1042 × 164 px at the test viewport with no horizontal overflow.
 
-- No actionable P0/P1/P2 issue remains.
-- The repeated row action column and clipped ellipsis shown in the source are absent. Destructive actions are moved to a contextual right-click menu, and the reclaimed column displays cumulative per-connection traffic.
-- The device drill-down now provides a scrollable host-level trace with separate upload, download, and cumulative bytes. This directly supports the device → destination → traffic task that was missing from the source state.
-- Full HTTPS URL paths remain outside this screen's claim because mihomo does not expose encrypted paths without MITM; the UI accurately labels the observable unit as `目标主机`.
+## Fidelity and usability checks
 
-**Required fidelity surfaces**
+- Typography: source name, quota, and delivery titles remain the strongest text. Supporting URL and dates are quieter without becoming detached microcopy.
+- Spacing: source, quota, and delivery sections align on one row; the card height was reduced by 41% from the first implementation and the empty lower band is gone.
+- Color and surfaces: existing Egresscope dark tokens, gateway green, primary blue, borders, and panel radii are preserved.
+- Assets: all visible symbols use the existing Phosphor icon library; no placeholder or handcrafted icon was added.
+- Copy: keeps the selected design's labels for node source, quota, expiry, update time, Surge, and Clash/Mihomo.
+- Responsive behavior: desktop uses three columns; narrow screens below 1050 px switch to a stacked layout; below 720 px the delivery links stack. The 1280 px test has no document overflow.
 
-- Fonts and typography: existing Inter / Noto Sans SC stack, 11–15 px operational text, numeric emphasis, and truncation behavior are preserved. The new context actions and trace columns use the same optical hierarchy as the existing console.
-- Spacing and layout rhythm: the table remains dense and independently scrollable. The detail drawer, context menu, and request-trace table reuse existing 7–11 px radii, borders, compact rows, and panel rhythm.
-- Colors and visual tokens: existing dark surface, border, primary blue, semantic red, and muted text tokens are reused; no new competing palette was introduced.
-- Image and asset quality: this workflow contains no raster product assets. All visible action icons use the existing Phosphor icon library; no handcrafted SVG, CSS illustration, emoji, or placeholder asset was introduced.
-- Copy and content: `操作`/repeated `终止` is removed from the table. Action wording is explicit in the right-click menu, and the target trace uses `目标主机`, `上传`, `下载`, and `累计` without redundant microcopy.
+## Interaction checks
 
-**Interactions tested**
+- The three-dot menu opens inside the viewport and exposes refresh, edit, rotate-link, and delete actions.
+- The edit action opens the existing subscription editor; closing the editor restores the inventory state.
+- Copy and download controls remain individually addressable.
+- Production build and Sites compatibility tests pass.
+- Browser diagnostics contain no warning or error entries; only Vite development connection and React DevTools informational messages are present.
 
-- Right-clicking a production connection opens `连接详情`, `设备流量历史`, `为目标增加规则`, and `终止连接`.
-- Left-clicking a connection opens a drawer with source device, target host/IP and port, protocol, duration, cumulative up/down bytes, rates, matched rule, and complete strategy chain.
-- The quick-rule editor loads the real policy inventory and previews an exact `DOMAIN`, `DOMAIN-SUFFIX`, or `IP-CIDR` mihomo rule. The destructive save/apply action was not submitted during QA.
-- Device history returns seven real targets for the tested device and renders accumulated upload/download/total bytes.
-- Browser console: no errors during production load and the tested interaction path.
-- Production health: Web service healthy and mihomo reachable.
+## Remaining findings
 
-**Comparison history**
-
-- Pass 1: device drill-down always highlighted `流量分析`, even when entered from `实时连接`. Fixed by preserving the originating navigation section while the device analysis is open.
-- Pass 2: production evidence shows `实时连接` remains selected, host-level traffic values populate from persisted/live data, and no P0/P1/P2 visual or interaction regression remains.
-
-**Follow-up polish**
-
-- P3: a future opt-in MITM subsystem could add URL-path auditing for explicitly enrolled devices, but it should remain separate from normal gateway metadata because it changes certificate trust and privacy boundaries.
+- No actionable P0, P1, or P2 visual issue remains in the tested state.
 
 final result: passed
