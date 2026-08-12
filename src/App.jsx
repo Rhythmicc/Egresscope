@@ -134,7 +134,7 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, user }) {
     <aside className={`sidebar ${collapsed ? "is-collapsed" : ""}`}>
       <button className="brand" onClick={() => setPage("dashboard")} aria-label="返回状态概览">
         <span className="brand-mark"><Stack weight="fill" /></span>
-        {!collapsed && <span>Egresscope</span>}
+        <span>Egresscope</span>
       </button>
       <nav className="nav-list" aria-label="主导航">
         {NAV.filter(item => user?.role === "admin" || item.viewer).map((item) => {
@@ -147,13 +147,13 @@ function Sidebar({ page, setPage, collapsed, setCollapsed, user }) {
               title={item.label}
             >
               <Icon weight={page === item.id ? "fill" : "regular"} />
-              {!collapsed && <span>{item.label}</span>}
+              <span>{item.label}</span>
             </button>
           );
         })}
       </nav>
-      <button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>
-        <Rows /> {!collapsed && <span>收起侧栏</span>}
+      <button className="collapse-button" aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"} onClick={() => setCollapsed(!collapsed)}>
+        <Rows /> <span>收起侧栏</span>
       </button>
     </aside>
   );
@@ -328,6 +328,26 @@ function ConnectionStatisticsTable({ connections, onSelect, onContext, dense = f
         </tr>;
       }) : <tr className="connection-table-empty"><td colSpan="10">当前筛选条件下没有连接记录</td></tr>}</tbody>
     </table>
+  </div>;
+}
+
+function ConnectionMobileList({ connections, onSelect, onContext }) {
+  return <div className="connection-mobile-list" data-testid="connections-mobile-list">
+    {connections.length ? connections.map(connection => {
+      const protocol = connectionProtocol(connection);
+      const active = connection.status === "active";
+      return <article className={`connection-mobile-card ${active ? "is-active" : "is-ended"}`} key={connection.id} onClick={() => onSelect?.(connection)}>
+        <header>
+          <span className={`connection-status ${active ? "active" : "ended"}`}><i />{active ? "活跃" : "已结束"}</span>
+          <span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span>
+          <button type="button" aria-label={`打开 ${connection.host || connection.destinationIP} 的连接操作`} onClick={event => { event.stopPropagation(); const box = event.currentTarget.getBoundingClientRect(); onContext?.({ clientX: box.right, clientY: box.bottom, preventDefault() {} }, connection); }}><DotsThreeVertical weight="bold" /></button>
+        </header>
+        <div className="connection-mobile-target"><strong>{connection.host || connection.destinationIP}</strong><span>{connection.destinationIP}:{connection.destinationPort}</span></div>
+        <div className="connection-mobile-source"><Desktop /><span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></div>
+        <div className="connection-mobile-chain">{connection.chain.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}</div>
+        <footer><span><small>总流量</small><strong>{bytes((connection.upload || 0) + (connection.download || 0))}</strong></span><span><small>上传 / 下载</small><strong>{bytes(connection.upload)} / {bytes(connection.download)}</strong></span><span><small>{active ? "持续时间" : "结束时间"}</small><strong>{active ? connectionDuration(connection.durationSeconds) : connectionTime(connection.endedAt)}</strong></span></footer>
+      </article>;
+    }) : <div className="connection-mobile-empty">当前筛选条件下没有连接记录</div>}
   </div>;
 }
 
@@ -632,6 +652,7 @@ function ConnectionsPage({ data, onDevice, canManage }) {
         </div>
         {message && <div className="inline-message">{message}</div>}
         <ConnectionStatisticsTable connections={filtered} onSelect={setInspected} onContext={openContextMenu} dense={compact} />
+        <ConnectionMobileList connections={filtered} onSelect={setInspected} onContext={openContextMenu} />
         <div className="list-summary"><span className={paused ? "paused-dot" : "live-dot"} />{paused ? "已暂停" : loading ? "更新中" : mode === "active" ? "实时更新" : "历史记录"}<b>{filtered.length} / {statistics.summary?.matched || 0} 条连接</b>{mode === "active" && <><span>↑ {rate(data.totals.upRate)}</span><span>↓ {rate(data.totals.downRate)}</span></>}<small>Asia/Shanghai</small></div>
       </section>
       <ConnectionContextMenu state={contextMenu} canManage={canManage} onClose={() => setContextMenu(null)} onInspect={setInspected} onDevice={onDevice} onTerminate={closeOne} onAddRule={openQuickRule} />

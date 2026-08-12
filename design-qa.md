@@ -37,6 +37,49 @@ final result: passed
 
 ---
 
+# Responsive shell and mobile operations design QA
+
+## Visual truth and evidence
+
+- Product visual source: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/option-1-dashboard.png` (1487 × 1058 px), the selected dashboard hierarchy and visual language.
+- Phone implementation: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/qa/mobile-dashboard-light.png` (390 × 844 px, 390 × 844 CSS px, DPR 1 capture).
+- Tablet implementation: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/qa/tablet-dashboard-light.png` (834 × 1112 px, 834 × 1112 CSS px, DPR 1 capture).
+- Combined visual comparison: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/design/qa/responsive-dashboard-comparison.png` (2209 × 844 px). The desktop source is normalized to 844 px height; phone and tablet remain at native capture density.
+- Additional operational evidence: `mobile-connections.png`, `mobile-dashboard.png`, `tablet-dashboard.png`, and `tablet-traffic-analysis.png` in the same QA directory.
+- State: demo administrator, realistic dashboard and connection data, light-mode hierarchy comparison plus dark-mode operational checks.
+- The source is a desktop visual rather than a 1:1 mobile mock. Comparison therefore evaluates preserved hierarchy, tokens, typography, and information priority; phone-specific navigation and card anatomy follow the product's explicit responsive decision rather than pretending to be pixel-identical to desktop.
+
+## Comparison history
+
+- Pass 1 removed the global 1120 px minimum width, introduced the tablet rail and phone bottom navigation, and stacked dense workspaces. The first phone connection capture exposed a P1 usability issue: the flexible toolbar collapsed to 35 px while its controls overflowed behind the connection cards. Dashboard period labels also wrapped one character per line at compact widths (P2).
+- Pass 2 gave the connection toolbar a fixed two-row, horizontally scrollable touch layout, kept search visible, hid the irrelevant density toggle on card view, and made segmented buttons non-shrinking. Post-fix captures show all primary filters, a 364 px independently scrolling card region, readable period labels, and no document-level horizontal overflow.
+
+## Required fidelity surfaces
+
+- Typography: source hierarchy remains intact—page title, primary metric, panel title, and operational data descend in the same order. Mobile keeps primary UI text at 11–18 px with no character-by-character wrapping.
+- Spacing and layout: phone uses 10 px page gutters, two-column summary metrics, stacked panels, and a 66 px safe-area-aware bottom navigation. Tablet uses a 68 px icon rail, two-column summaries, and full-width analytical panels. Both measured exactly to their viewport widths with no document overflow.
+- Colors and visual tokens: light and dark surface, border, primary, green, violet, orange, and red tokens are unchanged. Responsive work introduces no separate mobile palette or off-brand elevation.
+- Assets: all navigation, status, connection, and action symbols use the existing Phosphor icon set and existing brand mark; no placeholder, emoji substitute, CSS illustration, or handcrafted SVG was introduced.
+- Copy and content: exact navigation wording and order are preserved. Phone connection cards retain state, protocol, target, device/IP, complete strategy chain, total traffic, split upload/download, and duration/end time.
+
+## Interaction and accessibility checks
+
+- Phone bottom navigation is horizontally scrollable, safe-area aware, and provides 60 px-high targets for all role-visible destinations.
+- Tablet navigation collapses to an icon rail while retaining accessible button names and titles.
+- Connection rows become touch cards below 720 px. Card tap opens details; the visible 44 px action button exposes detail, device history, rule creation, and administrator termination—the same operations formerly dependent on right click.
+- Search and range/device/protocol filters remain operable on phone; intentionally wide secondary controls stay inside a contained horizontal scroller.
+- Rules use a contained table scroller rather than widening the page. Subscriptions, strategy cards, traffic attribution, gateway devices, user rows, modals, and login all stack inside the viewport.
+- Tested routes: 状态概览、连接统计、流量分析、分流策略、规则管理、订阅管理 at 390 × 844; 状态概览 and 流量分析 at 834 × 1112. Light and dark themes were both captured.
+- Browser diagnostics contained no warning or error entries.
+
+## Remaining findings
+
+- No actionable P0, P1, or P2 issue remains. Wide Sankey and rule tables intentionally use local horizontal scrolling because collapsing those relationships would remove operational information.
+
+final result: passed
+
+---
+
 # Connection statistics design QA
 
 ## Visual truth and evidence
