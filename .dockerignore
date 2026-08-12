@@ -1,0 +1,14 @@
+node_modules
+.git
+.DS_Store
+__pycache__
+*.pyc
+design
+.venv
+dist
+qa
+runtime
+secrets
+.env
+*.db*
+.pytest_cache

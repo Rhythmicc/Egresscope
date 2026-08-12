@@ -1,0 +1,62 @@
+name: egresscope
+
+services:
+  mihomo:
+    build:
+      context: .
+      dockerfile: Dockerfile.mihomo
+    image: egresscope-mihomo:v1.19.29
+    container_name: egresscope-mihomo
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./runtime/mihomo:/etc/mihomo
+    restart: unless-stopped
+    mem_limit: 384m
+    pids_limit: 256
+    logging:
+      driver: local
+      options: { max-size: "10m", max-file: "3" }
+
+  panel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: egresscope:local
+    container_name: egresscope
+    network_mode: host
+    environment:
+      EGRESSCOPE_SESSION_SECRET: ${EGRESSCOPE_SESSION_SECRET:?set EGRESSCOPE_SESSION_SECRET in .env}
+      EGRESSCOPE_ADMIN_USERNAME: ${EGRESSCOPE_ADMIN_USERNAME:-admin}
+      EGRESSCOPE_ADMIN_PASSWORD: ${EGRESSCOPE_ADMIN_PASSWORD:?set EGRESSCOPE_ADMIN_PASSWORD in .env}
+      EGRESSCOPE_SECURE_COOKIE: ${EGRESSCOPE_SECURE_COOKIE:-true}
+      EGRESSCOPE_AUDIT_RETENTION_DAYS: ${EGRESSCOPE_AUDIT_RETENTION_DAYS:-14}
+      EGRESSCOPE_INFRASTRUCTURE_SOURCE_IPS: ${EGRESSCOPE_INFRASTRUCTURE_SOURCE_IPS:-127.0.0.1,::1,198.18.0.1,172.17.0.2,172.18.0.3}
+      MIHOMO_CONTROLLER_SECRET: ${MIHOMO_CONTROLLER_SECRET:?set MIHOMO_CONTROLLER_SECRET in .env}
+      MIHOMO_CONTROLLER_URL: http://127.0.0.1:9090
+      MIHOMO_CONFIG_PATH: /mihomo/config.yaml
+      EGRESSCOPE_DATA_DIR: /data
+      EGRESSCOPE_DEVICE_ALIASES: /data/devices.json
+      EGRESSCOPE_TIMEZONE: Asia/Shanghai
+      TZ: Asia/Shanghai
+    volumes:
+      - ./runtime/panel:/data
+      - ./runtime/mihomo:/mihomo:ro
+    depends_on: [mihomo]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 256
+    logging:
+      driver: local
+      options: { max-size: "10m", max-file: "3" }

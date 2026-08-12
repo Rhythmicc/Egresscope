@@ -1,0 +1,375 @@
+{
+  "version": 1,
+  "ruleSets": [
+    {
+      "id": "legacy-E7BE8EE59BBDE59F9FE5908D",
+      "name": "美国域名",
+      "url": "https://raw.githubusercontent.com/Rhythmicc/ACL4SSR/master/Clash/us.list",
+      "policy": "🇺🇸 美国",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-GFWE58897E8A1A8",
+      "name": "GFW列表",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyGFWlist.list",
+      "policy": "🚀 节点选择",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E4B88BE8BDBDE5B7A5E585B7",
+      "name": "下载工具",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Download.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E88BB9E69E9CE4B8ADE59BBD",
+      "name": "苹果中国",
+      "url": "https://ruleset.skk.moe/List/non_ip/apple_cn.conf",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E697A5E69CACE59F9FE5908D",
+      "name": "日本域名",
+      "url": "https://raw.githubusercontent.com/Rhythmicc/ACL4SSR/master/Clash/jp.list",
+      "policy": "🇯🇵 日本",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E79BB4E8BF9EE59F9FE5908D",
+      "name": "直连域名",
+      "url": "https://raw.githubusercontent.com/Rhythmicc/ACL4SSR/master/Clash/direct.list",
+      "policy": "DIRECT",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E5B180E59F9FE7BD91",
+      "name": "局域网",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/LocalAreaNetwork.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E8A7A3E7A681",
+      "name": "解禁",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/UnBan.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E5B9BFE5918AE68BA6E688AA",
+      "name": "广告拦截",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/BanAD.list",
+      "policy": "🛑 全球拦截",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E5BA94E794A8E58780E58C96",
+      "name": "应用净化",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/BanProgramAD.list",
+      "policy": "🍃 应用净化",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E8B0B7E6AD8CFCM",
+      "name": "谷歌FCM",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/GoogleFCM.list",
+      "policy": "📢 谷歌FCM",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E8B0B7E6AD8CCN",
+      "name": "谷歌CN",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/GoogleCN.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Steam20CN",
+      "name": "Steam CN",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/SteamCN.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E5BEAEE8BDAFE69C8DE58AA1",
+      "name": "微软服务",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Microsoft.list",
+      "policy": "Ⓜ️ 微软服务",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E88BB9E69E9CE69C8DE58AA1",
+      "name": "苹果服务",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Apple.list",
+      "policy": "🍎 苹果服务",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Telegram",
+      "name": "Telegram",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Telegram.list",
+      "policy": "📲 电报信息",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E59BBDE5A496E5AA92E4BD93",
+      "name": "国外媒体",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyMedia.list",
+      "policy": "🌍 国外媒体",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E4BBA3E79086E7B2BEE7AE80",
+      "name": "代理精简",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ProxyLite.list",
+      "policy": "🚀 节点选择",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E59BBDE58685E59F9FE5908D",
+      "name": "国内域名",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ChinaDomain.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E59BBDE58685IP",
+      "name": "国内IP",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ChinaCompanyIp.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Bing",
+      "name": "Bing",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Bing.list",
+      "policy": "Ⓜ️ 微软Bing",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-OneDrive",
+      "name": "OneDrive",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/OneDrive.list",
+      "policy": "Ⓜ️ 微软云盘",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-AIE5B9B3E58FB0",
+      "name": "AI平台",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/AI.list",
+      "policy": "💬 Ai平台",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-OpenAI",
+      "name": "OpenAI",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/OpenAi.list",
+      "policy": "💬 Ai平台",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E7BD91E69893E4BA91E99FB3E4B990",
+      "name": "网易云音乐",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/NetEaseMusic.list",
+      "policy": "🎯 全球直连",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Epic",
+      "name": "Epic",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Epic.list",
+      "policy": "🎮 游戏平台",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Origin",
+      "name": "Origin",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Origin.list",
+      "policy": "🎮 游戏平台",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Sony",
+      "name": "Sony",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Sony.list",
+      "policy": "🎮 游戏平台",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Steam",
+      "name": "Steam",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Steam.list",
+      "policy": "🎮 游戏平台",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E4BBBBE5A4A9E5A082",
+      "name": "任天堂",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Nintendo.list",
+      "policy": "🎮 游戏平台",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-YouTube",
+      "name": "YouTube",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/YouTube.list",
+      "policy": "📹 油管视频",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-Netflix",
+      "name": "Netflix",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Netflix.list",
+      "policy": "🎥 奈飞视频",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E5B7B4E59388E5A786E789B9",
+      "name": "巴哈姆特",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Bahamut.list",
+      "policy": "📺 巴哈姆特",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E59394E593A9E59394E593A9E6B8AFE6BEB3E58FB0",
+      "name": "哔哩哔哩港澳台",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/BilibiliHMT.list",
+      "policy": "📺 哔哩哔哩",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E59394E593A9E59394E593A9",
+      "name": "哔哩哔哩",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/Ruleset/Bilibili.list",
+      "policy": "📺 哔哩哔哩",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-E59BBDE58685E5AA92E4BD93",
+      "name": "国内媒体",
+      "url": "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/ChinaMedia.list",
+      "policy": "🌏 国内媒体",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    },
+    {
+      "id": "legacy-AI",
+      "name": "AI",
+      "url": "https://ruleset.skk.moe/List/non_ip/ai.conf",
+      "policy": "🇺🇸 美国",
+      "enabled": true,
+      "interval": 86400,
+      "behavior": "classical",
+      "format": "text"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+FROM alpine:3.22.1
+
+ARG TARGETARCH
+ARG MIHOMO_VERSION=v1.19.29
+ARG MIHOMO_SHA256_AMD64=60de76a35a6cbf7b4fa4a20f5c257c24345d1d635ab1aa3877022a1997ef413c
+ARG MIHOMO_SHA256_ARM64=9a868b5e4e0ad91d9d71e1b41b0cfce78aaba44360c30df74a723f8e3926a86c
+
+RUN apk add --no-cache ca-certificates tzdata \
+    && case "$TARGETARCH" in \
+      amd64) asset="mihomo-linux-amd64-${MIHOMO_VERSION}.gz"; checksum="$MIHOMO_SHA256_AMD64" ;; \
+      arm64) asset="mihomo-linux-arm64-${MIHOMO_VERSION}.gz"; checksum="$MIHOMO_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && wget -q "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${asset}" -O /tmp/mihomo.gz \
+    && echo "${checksum}  /tmp/mihomo.gz" | sha256sum -c - \
+    && gzip -d /tmp/mihomo.gz \
+    && install -m 0755 /tmp/mihomo /usr/local/bin/mihomo \
+    && rm -f /tmp/mihomo
+
+LABEL org.opencontainers.image.title="mihomo for Egresscope" \
+      org.opencontainers.image.source="https://github.com/Rhythmicc/Egresscope" \
+      org.opencontainers.image.version="v1.19.29"
+
+ENTRYPOINT ["mihomo"]
+CMD ["-d", "/etc/mihomo", "-f", "/etc/mihomo/config.yaml"]

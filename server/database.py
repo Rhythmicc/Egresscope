@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
+
+LATEST_SCHEMA_VERSION = 3
+
+
+def connect(path: Path) -> sqlite3.Connection:
+    """Open the appliance database with the same safety pragmas everywhere."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA busy_timeout=10000")
+    return connection
+
+
+@contextmanager
+def transaction(path: Path) -> Iterator[sqlite3.Connection]:
+    connection = connect(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})")}
+
+
+def _migration_1(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'viewer',
+            allowed_devices TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS traffic_samples (
+            ts INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            up_bytes INTEGER NOT NULL,
+            down_bytes INTEGER NOT NULL,
+            active INTEGER NOT NULL,
+            interval_seconds INTEGER NOT NULL DEFAULT 10
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_ts ON traffic_samples(ts);
+        CREATE INDEX IF NOT EXISTS idx_traffic_device_ts ON traffic_samples(device, ts);
+        CREATE TABLE IF NOT EXISTS traffic_detail_samples (
+            ts INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            service TEXT NOT NULL,
+            host TEXT NOT NULL,
+            exit_mode TEXT NOT NULL DEFAULT 'unknown',
+            up_bytes INTEGER NOT NULL,
+            down_bytes INTEGER NOT NULL,
+            connections INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_detail_ts ON traffic_detail_samples(ts);
+        CREATE INDEX IF NOT EXISTS idx_traffic_detail_device_ts ON traffic_detail_samples(device, ts);
+        CREATE INDEX IF NOT EXISTS idx_traffic_detail_service_ts ON traffic_detail_samples(service, ts);
+        CREATE TABLE IF NOT EXISTS traffic_daily_rollups (
+            day_start INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            up_bytes INTEGER NOT NULL,
+            down_bytes INTEGER NOT NULL,
+            active_peak INTEGER NOT NULL,
+            samples INTEGER NOT NULL,
+            PRIMARY KEY(day_start, device, chain)
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_daily_device_day ON traffic_daily_rollups(device, day_start);
+        CREATE TABLE IF NOT EXISTS traffic_detail_daily_rollups (
+            day_start INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            service TEXT NOT NULL,
+            host TEXT NOT NULL,
+            exit_mode TEXT NOT NULL DEFAULT 'unknown',
+            up_bytes INTEGER NOT NULL,
+            down_bytes INTEGER NOT NULL,
+            connections INTEGER NOT NULL,
+            PRIMARY KEY(day_start, device, service, host, exit_mode)
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_detail_daily_device_day ON traffic_detail_daily_rollups(device, day_start);
+        CREATE INDEX IF NOT EXISTS idx_traffic_detail_daily_service_day ON traffic_detail_daily_rollups(service, day_start);
+        CREATE TABLE IF NOT EXISTS traffic_flow_samples (
+            ts INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            up_bytes INTEGER NOT NULL,
+            down_bytes INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_flow_device_ts ON traffic_flow_samples(device, ts);
+        CREATE TABLE IF NOT EXISTS traffic_flow_daily_rollups (
+            day_start INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            up_bytes INTEGER NOT NULL,
+            down_bytes INTEGER NOT NULL,
+            PRIMARY KEY(day_start, device, rule, chain)
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_flow_daily_device_day ON traffic_flow_daily_rollups(device, day_start);
+        CREATE TABLE IF NOT EXISTS collector_state (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS connection_cursors (
+            id TEXT PRIMARY KEY,
+            upload_bytes INTEGER NOT NULL,
+            download_bytes INTEGER NOT NULL,
+            seen_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_connection_cursors_seen ON connection_cursors(seen_at);
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id TEXT PRIMARY KEY,
+            owner_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            interval_seconds INTEGER NOT NULL DEFAULT 21600,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            gateway_enabled INTEGER NOT NULL DEFAULT 0,
+            source_format TEXT,
+            node_count INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT,
+            usage_json TEXT,
+            delivery_token TEXT UNIQUE NOT NULL,
+            fetched_at INTEGER,
+            next_refresh_at INTEGER,
+            last_error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_subscriptions_owner ON subscriptions(owner_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_subscriptions_refresh ON subscriptions(enabled, next_refresh_at);
+        """
+    )
+
+
+def _migration_2(connection: sqlite3.Connection) -> None:
+    if "interval_seconds" not in _columns(connection, "traffic_samples"):
+        connection.execute("ALTER TABLE traffic_samples ADD COLUMN interval_seconds INTEGER NOT NULL DEFAULT 10")
+    if "exit_mode" not in _columns(connection, "traffic_detail_samples"):
+        connection.execute("ALTER TABLE traffic_detail_samples ADD COLUMN exit_mode TEXT NOT NULL DEFAULT 'unknown'")
+    if "exit_mode" not in _columns(connection, "traffic_detail_daily_rollups"):
+        connection.executescript(
+            """
+            ALTER TABLE traffic_detail_daily_rollups RENAME TO traffic_detail_daily_rollups_legacy;
+            CREATE TABLE traffic_detail_daily_rollups (
+                day_start INTEGER NOT NULL,
+                device TEXT NOT NULL,
+                service TEXT NOT NULL,
+                host TEXT NOT NULL,
+                exit_mode TEXT NOT NULL DEFAULT 'unknown',
+                up_bytes INTEGER NOT NULL,
+                down_bytes INTEGER NOT NULL,
+                connections INTEGER NOT NULL,
+                PRIMARY KEY(day_start, device, service, host, exit_mode)
+            );
+            INSERT INTO traffic_detail_daily_rollups(day_start,device,service,host,exit_mode,up_bytes,down_bytes,connections)
+            SELECT day_start,device,service,host,'unknown',up_bytes,down_bytes,connections
+            FROM traffic_detail_daily_rollups_legacy;
+            DROP TABLE traffic_detail_daily_rollups_legacy;
+            CREATE INDEX idx_traffic_detail_daily_device_day ON traffic_detail_daily_rollups(device, day_start);
+            CREATE INDEX idx_traffic_detail_daily_service_day ON traffic_detail_daily_rollups(service, day_start);
+            """
+        )
+
+
+def _migration_3(connection: sqlite3.Connection) -> None:
+    if "session_version" not in _columns(connection, "users"):
+        connection.execute("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1")
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS traffic_class_daily_rollups (
+            day_start INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            route_class TEXT NOT NULL CHECK(route_class IN ('direct','proxy','unknown')),
+            up_bytes INTEGER NOT NULL,
+            down_bytes INTEGER NOT NULL,
+            PRIMARY KEY(day_start, device, route_class)
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_class_device_day ON traffic_class_daily_rollups(device, day_start);
+        CREATE TABLE IF NOT EXISTS connection_sessions (
+            id TEXT PRIMARY KEY,
+            device TEXT NOT NULL,
+            host TEXT NOT NULL,
+            destination_ip TEXT NOT NULL,
+            destination_port TEXT NOT NULL,
+            network TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            started_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            upload_bytes INTEGER NOT NULL,
+            download_bytes INTEGER NOT NULL,
+            termination_reason TEXT,
+            terminated_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_connection_sessions_device_seen ON connection_sessions(device, last_seen_at);
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            action TEXT NOT NULL,
+            resource_type TEXT NOT NULL,
+            resource_id TEXT,
+            result TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at);
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO traffic_class_daily_rollups(day_start,device,route_class,up_bytes,down_bytes)
+        SELECT day_start,device,
+               CASE WHEN instr(chain, 'DIRECT') > 0 THEN 'direct'
+                    WHEN chain = '' OR chain = 'UNKNOWN' THEN 'unknown'
+                    ELSE 'proxy' END,
+               SUM(up_bytes),SUM(down_bytes)
+        FROM traffic_flow_daily_rollups
+        GROUP BY day_start,device,
+                 CASE WHEN instr(chain, 'DIRECT') > 0 THEN 'direct'
+                      WHEN chain = '' OR chain = 'UNKNOWN' THEN 'unknown'
+                      ELSE 'proxy' END
+        ON CONFLICT(day_start,device,route_class) DO NOTHING
+        """
+    )
+
+
+MIGRATIONS = (_migration_1, _migration_2, _migration_3)
+
+
+def migrate(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL DEFAULT (unixepoch()))"
+    )
+    applied = {int(row[0]) for row in connection.execute("SELECT version FROM schema_migrations")}
+    for version, migration in enumerate(MIGRATIONS, start=1):
+        if version in applied:
+            continue
+        with connection:
+            migration(connection)
+            connection.execute("INSERT INTO schema_migrations(version) VALUES(?)", (version,))
+            connection.execute(f"PRAGMA user_version={version}")
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if version > LATEST_SCHEMA_VERSION:
+        raise RuntimeError(f"database schema {version} is newer than supported {LATEST_SCHEMA_VERSION}")
