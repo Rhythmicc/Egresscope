@@ -78,24 +78,44 @@ proxies:
         profile = yaml.safe_load(_clash_delivery("Example", nodes))
         self.assertEqual(profile["mixed-port"], 7890)
         self.assertTrue(profile["unified-delay"])
-        self.assertEqual(profile["rules"][-1], "MATCH,节点选择")
-        self.assertIn("美国最佳", [group["name"] for group in profile["proxy-groups"]])
-        best = next(group for group in profile["proxy-groups"] if group["name"] == "美国最佳")
+        self.assertEqual(profile["rules"][-1], "MATCH,🐟 漏网之鱼")
+        group_names = [group["name"] for group in profile["proxy-groups"]]
+        self.assertIn("💬 Ai平台", group_names)
+        self.assertIn("🇺🇸 美国最佳", group_names)
+        best = next(group for group in profile["proxy-groups"] if group["name"] == "🇺🇸 美国最佳")
         self.assertEqual(best["expected-status"], 204)
         self.assertEqual(best["url"], "https://www.gstatic.com/generate_204")
+        self.assertGreaterEqual(len(profile["rule-providers"]), 30)
+        self.assertTrue(any(rule.endswith(",🇺🇸 美国") for rule in profile["rules"]))
+        self.assertNotIn("http-listen", profile)
 
     def test_generates_complete_surge_profile(self):
         nodes = [{"name": "🇺🇸 US A", "type": "anytls", "server": "us.example.com", "port": 443, "password": "secret", "sni": "edge.example.com", "skip-cert-verify": False}]
-        profile = _surge_delivery("Example", nodes)
+        profile = _surge_delivery("Example", nodes, "https://proxy.example/sub/token/surge.conf")
+        self.assertTrue(profile.startswith("#!MANAGED-CONFIG https://proxy.example/sub/token/surge.conf interval=86400 strict=true"))
         self.assertIn("[General]", profile)
         self.assertIn("[Proxy]", profile)
         self.assertIn("🇺🇸 US A = anytls, us.example.com, 443, password=secret", profile)
-        self.assertIn("美国智能 = load-balance", profile)
+        self.assertIn("🇺🇸 美国智能 = load-balance", profile)
+        self.assertIn("💬 Ai平台 = select", profile)
+        self.assertIn("RULE-SET,https://", profile)
         self.assertIn("url=http://www.gstatic.com/generate_204", profile)
         self.assertIn("persistent=true", profile)
+        self.assertIn("tun-excluded-routes", profile)
         self.assertNotIn("proxy-test-url", profile)
         self.assertNotIn("internet-test-url", profile)
-        self.assertTrue(profile.rstrip().endswith("FINAL,节点选择"))
+        self.assertNotIn("http-listen", profile)
+        self.assertNotIn("[Script]", profile)
+        self.assertNotIn("[Host]", profile)
+        self.assertTrue(profile.rstrip().endswith("FINAL,🐟 漏网之鱼"))
+
+    def test_delivery_rules_fall_back_when_region_is_missing(self):
+        nodes = [{"name": "🇺🇸 US A", "type": "ss", "server": "us.example.com", "port": 443, "cipher": "aes-128-gcm", "password": "secret"}]
+        clash = yaml.safe_load(_clash_delivery("Example", nodes))
+        self.assertNotIn("🇯🇵 日本", [group["name"] for group in clash["proxy-groups"]])
+        self.assertFalse(any(rule.endswith(",🇯🇵 日本") for rule in clash["rules"]))
+        surge = _surge_delivery("Example", nodes)
+        self.assertNotIn(",🇯🇵 日本,update-interval=", surge)
 
 
 class SubscriptionUrlValidationTests(unittest.IsolatedAsyncioTestCase):

@@ -670,6 +670,67 @@ def _overlay_subscription_nodes(config: dict[str, Any], nodes: list[dict[str, An
 
 DELIVERY_TEST_URL = "https://www.gstatic.com/generate_204"
 SURGE_DELIVERY_TEST_URL = "http://www.gstatic.com/generate_204"
+REGION_EMOJIS = {
+    "香港": "🇭🇰",
+    "日本": "🇯🇵",
+    "美国": "🇺🇸",
+    "新加坡": "🇸🇬",
+    "英国": "🇬🇧",
+    "台湾": "🇹🇼",
+    "德国": "🇩🇪",
+    "其他": "🌐",
+}
+DELIVERY_MAIN_POLICY = "🚀 节点选择"
+DELIVERY_MANUAL_POLICY = "🔧 手动切换"
+DELIVERY_DIRECT_POLICY = "🎯 全球直连"
+DELIVERY_REJECT_POLICY = "🛑 全球拦截"
+DELIVERY_CLEAN_POLICY = "🍃 应用净化"
+DELIVERY_FINAL_POLICY = "🐟 漏网之鱼"
+DELIVERY_SERVICE_POLICIES = (
+    "🌍 国外媒体",
+    "📲 电报信息",
+    "🍎 苹果服务",
+    "💬 Ai平台",
+    "📢 谷歌FCM",
+    "📹 油管视频",
+    "📺 哔哩哔哩",
+    "Ⓜ️ 微软云盘",
+    "🎮 游戏平台",
+    "🌏 国内媒体",
+    "🎥 奈飞视频",
+    "Ⓜ️ 微软服务",
+    "📺 巴哈姆特",
+    "Ⓜ️ 微软Bing",
+)
+
+
+def _delivery_region_policy(region: str) -> str:
+    return f"{REGION_EMOJIS.get(region, '🌐')} {region}"
+
+
+def _delivery_rule_sets() -> list[dict[str, Any]]:
+    """Load the shared, credential-free delivery rule catalog in its declared order."""
+    try:
+        payload = json.loads(settings.default_rule_sets_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("无法读取交付规则集目录") from exc
+    result: list[dict[str, Any]] = []
+    for item in payload.get("ruleSets") or []:
+        if not isinstance(item, dict) or not item.get("enabled", True):
+            continue
+        url = str(item.get("url") or "").strip()
+        policy = str(item.get("policy") or "").strip()
+        if not url.startswith(("https://", "http://")) or not policy:
+            continue
+        result.append(item)
+    return result
+
+
+def _delivery_policy(policy: str, regions: list[tuple[str, list[str]]]) -> str:
+    """Fall back safely when a shared rule targets a region absent from this subscription."""
+    available = {_delivery_region_policy(region) for region, _ in regions}
+    regional = {_delivery_region_policy(region) for region in REGION_EMOJIS}
+    return policy if policy not in regional or policy in available else DELIVERY_MAIN_POLICY
 
 
 def _delivery_regions(nodes: list[dict[str, Any]]) -> list[tuple[str, list[str]]]:
@@ -688,17 +749,28 @@ def _delivery_regions(nodes: list[dict[str, Any]]) -> list[tuple[str, list[str]]
 
 def _clash_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
     regions = _delivery_regions(nodes)
-    regional_groups = [f"{region}策略" for region, _ in regions]
+    regional_groups = [_delivery_region_policy(region) for region, _ in regions]
+    policy_choices = [DELIVERY_MAIN_POLICY, DELIVERY_DIRECT_POLICY, DELIVERY_MANUAL_POLICY, *regional_groups]
     proxy_groups: list[dict[str, Any]] = [
-        {"name": "节点选择", "type": "select", "proxies": [*regional_groups, "手动选择", "DIRECT"]},
-        {"name": "手动选择", "type": "select", "proxies": [*[str(node["name"]) for node in nodes], "DIRECT"]},
+        {"name": DELIVERY_MAIN_POLICY, "type": "select", "proxies": [*regional_groups, DELIVERY_MANUAL_POLICY, "DIRECT"]},
+        {"name": DELIVERY_MANUAL_POLICY, "type": "select", "proxies": [*[str(node["name"]) for node in nodes], "DIRECT"]},
     ]
+    proxy_groups.extend({"name": policy, "type": "select", "proxies": policy_choices} for policy in DELIVERY_SERVICE_POLICIES)
+    proxy_groups.extend(
+        [
+            {"name": DELIVERY_DIRECT_POLICY, "type": "select", "proxies": ["DIRECT", DELIVERY_MAIN_POLICY]},
+            {"name": DELIVERY_REJECT_POLICY, "type": "select", "proxies": ["REJECT", DELIVERY_DIRECT_POLICY]},
+            {"name": DELIVERY_CLEAN_POLICY, "type": "select", "proxies": ["REJECT", DELIVERY_DIRECT_POLICY]},
+            {"name": DELIVERY_FINAL_POLICY, "type": "select", "proxies": policy_choices},
+        ]
+    )
     for region, members in regions:
-        best = f"{region}最佳"
-        sticky = f"{region}智能"
+        policy = _delivery_region_policy(region)
+        best = f"{policy}最佳"
+        sticky = f"{policy}智能"
         proxy_groups.extend(
             [
-                {"name": f"{region}策略", "type": "select", "proxies": [best, sticky, "手动选择"]},
+                {"name": policy, "type": "select", "proxies": [best, sticky, DELIVERY_MANUAL_POLICY]},
                 {
                     "name": best,
                     "type": "url-test",
@@ -723,6 +795,21 @@ def _clash_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
                 },
             ]
         )
+    rule_providers: dict[str, dict[str, Any]] = {}
+    rules: list[str] = []
+    for item in _delivery_rule_sets():
+        provider_id = "egresscope-" + hashlib.sha1(str(item.get("id") or item["url"]).encode()).hexdigest()[:12]
+        rule_providers[provider_id] = {
+            "type": "http",
+            "url": str(item["url"]),
+            "path": f"./ruleset/{provider_id}.txt",
+            "interval": max(300, int(item.get("interval") or 86400)),
+            "behavior": item.get("behavior") or "classical",
+            "format": item.get("format") or "text",
+            "proxy": DELIVERY_MAIN_POLICY,
+        }
+        rules.append(f"RULE-SET,{provider_id},{_delivery_policy(str(item['policy']), regions)}")
+    rules.extend((f"GEOIP,CN,{DELIVERY_DIRECT_POLICY}", f"MATCH,{DELIVERY_FINAL_POLICY}"))
     payload = {
         "mixed-port": 7890,
         "allow-lan": False,
@@ -741,7 +828,8 @@ def _clash_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
         },
         "proxies": nodes,
         "proxy-groups": proxy_groups,
-        "rules": ["GEOIP,LAN,DIRECT,no-resolve", "GEOIP,CN,DIRECT", "MATCH,节点选择"],
+        "rule-providers": rule_providers,
+        "rules": rules,
     }
     return yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
 
@@ -787,32 +875,55 @@ def _surge_node_line(node: dict[str, Any]) -> str | None:
     return f"{name} = {', '.join(parts)}"
 
 
-def _surge_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
+def _surge_delivery(name: str, nodes: list[dict[str, Any]], managed_url: str | None = None) -> str:
     rendered = [(node, _surge_node_line(node)) for node in nodes]
     supported_nodes = [node for node, line in rendered if line]
     proxy_lines = [line for _, line in rendered if line]
     if not proxy_lines:
         raise ValueError("该订阅没有 Surge 支持的节点协议")
     regions = _delivery_regions(supported_nodes)
+    regional_groups = [_delivery_region_policy(region) for region, _ in regions]
+    policy_choices = [DELIVERY_MAIN_POLICY, DELIVERY_DIRECT_POLICY, DELIVERY_MANUAL_POLICY, *regional_groups]
+    node_names = [_surge_scalar(node["name"]) for node in supported_nodes]
     group_lines = [
-        f"节点选择 = select, {', '.join([*[f'{region}策略' for region, _ in regions], '手动选择', 'DIRECT'])}",
-        f"手动选择 = select, {', '.join([*[str(node['name']) for node in supported_nodes], 'DIRECT'])}",
+        f"{DELIVERY_MAIN_POLICY} = select, {', '.join([*regional_groups, DELIVERY_MANUAL_POLICY, 'DIRECT'])}",
+        f"{DELIVERY_MANUAL_POLICY} = select, {', '.join([*node_names, 'DIRECT'])}",
     ]
+    group_lines.extend(f"{policy} = select, {', '.join(policy_choices)}" for policy in DELIVERY_SERVICE_POLICIES)
+    group_lines.extend(
+        [
+            f"{DELIVERY_DIRECT_POLICY} = select, DIRECT, {DELIVERY_MAIN_POLICY}",
+            f"{DELIVERY_REJECT_POLICY} = select, REJECT, {DELIVERY_DIRECT_POLICY}",
+            f"{DELIVERY_CLEAN_POLICY} = select, REJECT, {DELIVERY_DIRECT_POLICY}",
+            f"{DELIVERY_FINAL_POLICY} = select, {', '.join(policy_choices)}",
+        ]
+    )
     for region, members in regions:
+        policy = _delivery_region_policy(region)
+        best = f"{policy}最佳"
+        sticky = f"{policy}智能"
+        escaped_members = [_surge_scalar(member) for member in members]
         group_lines.extend(
             [
-                f"{region}策略 = select, {region}最佳, {region}智能, 手动选择",
-                f"{region}最佳 = url-test, {', '.join(members)}, url={SURGE_DELIVERY_TEST_URL}, interval=300, tolerance=80, timeout=5",
-                f"{region}智能 = load-balance, {', '.join(members)}, url={SURGE_DELIVERY_TEST_URL}, interval=300, timeout=5, persistent=true",
+                f"{policy} = select, {best}, {sticky}, {DELIVERY_MANUAL_POLICY}",
+                f"{best} = url-test, {', '.join(escaped_members)}, url={SURGE_DELIVERY_TEST_URL}, interval=300, tolerance=80, timeout=5",
+                f"{sticky} = load-balance, {', '.join(escaped_members)}, url={SURGE_DELIVERY_TEST_URL}, interval=300, timeout=5, persistent=true",
             ]
         )
+    rule_lines = [
+        f"RULE-SET,{item['url']},{_delivery_policy(str(item['policy']), regions)},update-interval={max(300, int(item.get('interval') or 86400))}"
+        for item in _delivery_rule_sets()
+    ]
+    preamble = [f"#!MANAGED-CONFIG {managed_url} interval=86400 strict=true", ""] if managed_url else []
     return "\n".join(
         [
-            f"#!MANAGED-CONFIG {name} · Egresscope",
-            "",
+            *preamble,
             "[General]",
             "loglevel = notify",
             "dns-server = system, 119.29.29.29, 223.5.5.5",
+            "test-timeout = 5",
+            "skip-proxy = 127.0.0.1, localhost, *.local, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10",
+            "tun-excluded-routes = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10",
             "ipv6 = false",
             "",
             "[Proxy]",
@@ -822,8 +933,9 @@ def _surge_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
             *group_lines,
             "",
             "[Rule]",
-            "GEOIP,CN,DIRECT",
-            "FINAL,节点选择",
+            *rule_lines,
+            f"GEOIP,CN,{DELIVERY_DIRECT_POLICY}",
+            f"FINAL,{DELIVERY_FINAL_POLICY}",
             "",
         ]
     )
@@ -1126,7 +1238,7 @@ class SubscriptionStore:
             rows = connection.execute("SELECT id FROM subscriptions WHERE enabled = 1 AND next_refresh_at <= ? ORDER BY next_refresh_at LIMIT 8", (int(time.time()),)).fetchall()
         return [str(row["id"]) for row in rows]
 
-    def delivery(self, token: str, client: str) -> str:
+    def delivery(self, token: str, client: str, managed_url: str | None = None) -> str:
         with _db() as connection:
             row = connection.execute("SELECT name,payload_json FROM subscriptions WHERE delivery_token = ? AND enabled = 1", (token,)).fetchone()
         if not row or not row["payload_json"]:
@@ -1135,7 +1247,7 @@ class SubscriptionStore:
         if client == "clash":
             return _clash_delivery(str(row["name"]), nodes)
         if client == "surge":
-            return _surge_delivery(str(row["name"]), nodes)
+            return _surge_delivery(str(row["name"]), nodes, managed_url)
         raise KeyError(client)
 
     def overlay_config(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -2547,9 +2659,9 @@ async def clash_subscription_delivery(token: str) -> PlainTextResponse:
 
 
 @app.get("/sub/{token}/surge.conf", response_class=PlainTextResponse)
-async def surge_subscription_delivery(token: str) -> PlainTextResponse:
+async def surge_subscription_delivery(token: str, request: Request) -> PlainTextResponse:
     try:
-        payload = await asyncio.to_thread(subscriptions.delivery, token, "surge")
+        payload = await asyncio.to_thread(subscriptions.delivery, token, "surge", str(request.url))
         return PlainTextResponse(
             payload,
             media_type="text/plain; charset=utf-8",
