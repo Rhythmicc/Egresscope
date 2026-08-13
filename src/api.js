@@ -99,8 +99,8 @@ export const api = {
     if (attributionPeriod) query.set("attributionPeriod", attributionPeriod);
     return request(`/api/traffic-analysis?${query}`);
   },
-  trafficLedger: ({ range, route = "proxy", order = "traffic", group = "device-target", device = "", query = "", limit = 100, offset = 0 }) => {
-    const search = new URLSearchParams({ range, route, order, group, limit: String(limit), offset: String(offset) });
+  trafficLedger: ({ range, route = "proxy", order = "traffic", group = "device-target", visibility = "significant", device = "", query = "", limit = 100, offset = 0 }) => {
+    const search = new URLSearchParams({ range, route, order, group, visibility, limit: String(limit), offset: String(offset) });
     if (device) search.set("device", device);
     if (query) search.set("query", query);
     return request(`/api/traffic-ledger?${search}`);

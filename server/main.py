@@ -104,6 +104,7 @@ TRAFFIC_LEDGER_RANGES = {
     "14d": 14 * 24 * 60 * 60,
     "month": 30 * 24 * 60 * 60,
 }
+TRAFFIC_LEDGER_SIGNIFICANT_BYTES = 1024**2
 
 
 def _is_infrastructure_source(address: str) -> bool:
@@ -3501,11 +3502,17 @@ def _traffic_ledger(
     limit: int,
     offset: int,
     group_mode: str = "device-target",
+    visibility: str = "significant",
 ) -> dict[str, Any]:
     """Return target-level spend evidence, with connection detail available on demand."""
     now = int(time.time())
     start = _calendar_start("month", now) if range_key == "month" else now - TRAFFIC_LEDGER_RANGES[range_key]
     allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    minimum_group_traffic = (
+        TRAFFIC_LEDGER_SIGNIFICANT_BYTES
+        if group_mode != "connection" and visibility == "significant"
+        else 0
+    )
     conditions = ["last_seen_at >= ?"]
     parameters: list[Any] = [start]
     if route == "proxy":
@@ -3518,7 +3525,13 @@ def _traffic_ledger(
         parameters.extend(sorted(INFRASTRUCTURE_SOURCE_IPS))
     if device:
         if allowed is not None and device not in allowed:
-            return {"range": range_key, "route": route, "summary": {"events": 0, "groups": 0, "traffic": 0, "devices": 0}, "events": []}
+            return {
+                "range": range_key,
+                "route": route,
+                "visibility": visibility,
+                "summary": {"events": 0, "groups": 0, "allGroups": 0, "hiddenGroups": 0, "traffic": 0, "devices": 0},
+                "events": [],
+            }
         conditions.append("device = ?")
         parameters.append(device)
     elif allowed is not None:
@@ -3568,14 +3581,18 @@ def _traffic_ledger(
         else:
             grouped_summary = connection.execute(
                 f"""
-                SELECT COUNT(*) groups_count FROM (
-                    SELECT 1 FROM connection_sessions WHERE {where}
+                SELECT COUNT(*) all_groups,
+                       COALESCE(SUM(CASE WHEN traffic >= ? THEN 1 ELSE 0 END), 0) visible_groups
+                FROM (
+                    SELECT SUM(upload_bytes + download_bytes) traffic
+                    FROM connection_sessions WHERE {where}
                     GROUP BY device, {target_expression}, {route_expression}
                 )
                 """,
-                parameters,
+                [minimum_group_traffic, *parameters],
             ).fetchone()
-            group_count = int(grouped_summary["groups_count"] or 0)
+            all_group_count = int(grouped_summary["all_groups"] or 0)
+            group_count = int(grouped_summary["visible_groups"] or 0)
             group_ordering = "grouped.upload_bytes + grouped.download_bytes DESC, grouped.group_last_seen_at DESC" if order == "traffic" else "grouped.group_last_seen_at DESC, grouped.upload_bytes + grouped.download_bytes DESC"
             rows = connection.execute(
                 f"""
@@ -3617,10 +3634,13 @@ def _traffic_ledger(
                  AND ranked.target_key = grouped.target_key
                  AND ranked.route_key = grouped.route_key
                  AND ranked.row_rank = 1
+                WHERE grouped.upload_bytes + grouped.download_bytes >= ?
                 ORDER BY {group_ordering} LIMIT ? OFFSET ?
                 """,
-                [*parameters, now, limit, offset],
+                [*parameters, now, minimum_group_traffic, limit, offset],
             ).fetchall()
+        if group_mode == "connection":
+            all_group_count = group_count
     aliases = _aliases()
     try:
         group_names = set(rule_workspace.summary().get("availablePolicies") or [])
@@ -3701,11 +3721,15 @@ def _traffic_ledger(
         "range": range_key,
         "route": route,
         "order": order,
+        "visibility": visibility,
+        "significantThresholdBytes": TRAFFIC_LEDGER_SIGNIFICANT_BYTES,
         "retentionDays": settings.retention_days,
         "precision": {"unit": "device-target" if group_mode != "connection" else "connection", "target": "host-or-ip", "urlPathAvailable": False},
         "summary": {
             "events": int(summary["events"] or 0),
             "groups": group_count,
+            "allGroups": all_group_count,
+            "hiddenGroups": max(0, all_group_count - group_count),
             "devices": int(summary["devices"] or 0),
             "upload": upload,
             "download": download,
@@ -3732,6 +3756,7 @@ async def traffic_ledger(
     route: str = Query(default="proxy", pattern="^(proxy|direct|all)$"),
     order: str = Query(default="traffic", pattern="^(traffic|recent)$"),
     group: str = Query(default="device-target", pattern="^(device-target|connection)$"),
+    visibility: str = Query(default="significant", pattern="^(significant|all)$"),
     device: str = Query(default="", max_length=80),
     query: str = Query(default="", max_length=120),
     limit: int = Query(default=100, ge=1, le=500),
@@ -3739,7 +3764,7 @@ async def traffic_ledger(
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     return await asyncio.to_thread(
-        _traffic_ledger, user, range, route, order, device.strip(), query.strip(), limit, offset, group
+        _traffic_ledger, user, range, route, order, device.strip(), query.strip(), limit, offset, group, visibility
     )
 
 
