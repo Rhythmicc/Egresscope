@@ -37,6 +37,39 @@ final result: passed
 
 ---
 
+# Traffic attribution ledger design QA
+
+## Visual truth and evidence
+
+- Previous aggregate-only state: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/01-current-traffic-attribution.png` (1280 × 820 px).
+- Final connection-level state: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/03-traffic-ledger-desktop-final.png` (1280 × 820 px).
+- Required side-by-side comparison: `/Users/lianhaocheng/Documents/Codex/2026-08-11/new-chat/ssslab-proxy/qa/07-traffic-ledger-comparison.png` (2560 × 820 px).
+- Responsive checks: 834 × 1112 tablet and 390 × 844 phone; dark theme and realistic large-download, Matrix, Microsoft, and direct-LAN events.
+
+## Findings and iteration
+
+- The original service and device aggregates separated destination evidence from rule and exit evidence. It could not answer which device generated a costly connection through which rule, policy, and physical node (P1 product gap).
+- The new ledger keeps time, source device, target host/IP, upload/download totals, matched managed rule, route class, selected policy, and final exit node in one connection record.
+- Pass 1 exposed a clipped action column at 1280 px and demo totals that did not agree with the selected period (P2). Pass 2 compressed fixed columns, preserved readable hierarchy, and aligned the demo ledger with the 4.1 GB proxy total.
+- Tablet rows use a two-line evidence card; phone rows use a four-band touch layout without document-level horizontal overflow.
+
+## Interaction and runtime checks
+
+- `代理出口 / 直连对照` and `流量优先 / 最近发生` change the evidence set and ordering.
+- Search is sent to the backend after a short debounce and matches device, host/IP, rule, policy, or node.
+- Administrator `改规则` opens the existing quick-rule workflow with the target and current policy prefilled; an active connection defaults to “应用后终止当前连接” so the application reconnects under the new rule. Viewers retain read-only evidence.
+- HTTPS evidence is deliberately labeled as a host or IP. Full encrypted URL paths are not claimed or exposed without TLS interception or an endpoint agent.
+- Production image passed 14 backend tests, both gateway dependencies report healthy, and the deployed container runs the exact candidate image digest.
+
+## Remaining findings
+
+- No actionable P0, P1, or P2 visual issue remains in the tested state.
+- A connection spanning a selected range boundary reports its complete connection byte total. Per-bucket byte allocation would require extending the collector schema with connection-level deltas.
+
+final result: passed
+
+---
+
 # Gateway runtime and event history design QA
 
 ## Visual truth and evidence
@@ -154,3 +187,10 @@ final result: passed
 - No actionable P0, P1, or P2 visual issue remains in the tested state.
 
 final result: passed
+# 2026-08-13 · 高流量异常守卫
+
+- 桌面 1280×820：异常守卫与代理花费追踪形成清晰的“发现—处置—追溯”顺序；阈值、决策方式、最近异常与设置入口均在一行可读。
+- 平板 834×1112：守卫卡片分为状态行和最近异常行，没有横向溢出；连接追踪沿用平板双行布局。
+- 手机 390×844：阈值、处置方式和最近异常自动重排，底部导航与卡片无重叠。
+- 交互：设置弹窗可切换监测/自动执行、阈值、AI/固定动作、冷却期与保护目标；开启自动执行后显示强提醒。
+- 结果：通过。验收图见 `qa/anomaly-guard-desktop.png`、`qa/anomaly-guard-tablet.png`、`qa/anomaly-guard-mobile.png`。

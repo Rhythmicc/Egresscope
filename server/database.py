@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 8
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -271,7 +271,94 @@ def _migration_5(connection: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS = (_migration_1, _migration_2, _migration_3, _migration_4, _migration_5)
+def _migration_6(connection: sqlite3.Connection) -> None:
+    subscription_columns = _columns(connection, "subscriptions")
+    if "raw_payload_json" not in subscription_columns:
+        connection.execute("ALTER TABLE subscriptions ADD COLUMN raw_payload_json TEXT")
+    if "filter_json" not in subscription_columns:
+        connection.execute("ALTER TABLE subscriptions ADD COLUMN filter_json TEXT NOT NULL DEFAULT '{}'")
+    if "filter_source" not in subscription_columns:
+        connection.execute("ALTER TABLE subscriptions ADD COLUMN filter_source TEXT NOT NULL DEFAULT 'manual'")
+    if "filter_updated_at" not in subscription_columns:
+        connection.execute("ALTER TABLE subscriptions ADD COLUMN filter_updated_at INTEGER")
+    if "ai_analysis_json" not in subscription_columns:
+        connection.execute("ALTER TABLE subscriptions ADD COLUMN ai_analysis_json TEXT")
+    connection.execute(
+        "UPDATE subscriptions SET raw_payload_json = payload_json WHERE raw_payload_json IS NULL AND payload_json IS NOT NULL"
+    )
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS ai_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            provider TEXT NOT NULL CHECK(provider IN ('deepseek','openrouter')),
+            model TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );
+        """
+    )
+
+
+def _migration_7(connection: sqlite3.Connection) -> None:
+    session_columns = _columns(connection, "connection_sessions")
+    additions = {
+        "rule_type": "TEXT NOT NULL DEFAULT ''",
+        "rule_payload": "TEXT NOT NULL DEFAULT ''",
+        "rule_source": "TEXT NOT NULL DEFAULT 'unknown'",
+        "rule_source_id": "TEXT NOT NULL DEFAULT ''",
+        "rule_label": "TEXT NOT NULL DEFAULT ''",
+    }
+    for column, declaration in additions.items():
+        if column not in session_columns:
+            connection.execute(f"ALTER TABLE connection_sessions ADD COLUMN {column} {declaration}")
+    connection.execute("UPDATE connection_sessions SET rule_label = rule WHERE rule_label = ''")
+    connection.execute(
+        "UPDATE connection_sessions SET rule_type = 'RuleSet', rule_payload = rule "
+        "WHERE rule_payload = '' AND rule LIKE 'ssslab-%'"
+    )
+
+
+def _migration_8(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS traffic_anomaly_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            autonomous INTEGER NOT NULL DEFAULT 0,
+            threshold_bytes INTEGER NOT NULL DEFAULT 5368709120,
+            action_policy TEXT NOT NULL DEFAULT 'ai' CHECK(action_policy IN ('ai','block','direct','alert')),
+            cooldown_seconds INTEGER NOT NULL DEFAULT 3600,
+            protected_targets TEXT NOT NULL DEFAULT '[]',
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS traffic_anomaly_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT NOT NULL UNIQUE,
+            connection_id TEXT NOT NULL,
+            device TEXT NOT NULL DEFAULT '',
+            source_ip TEXT NOT NULL DEFAULT '',
+            host TEXT NOT NULL DEFAULT '',
+            destination_ip TEXT NOT NULL DEFAULT '',
+            traffic_bytes INTEGER NOT NULL DEFAULT 0,
+            route TEXT NOT NULL DEFAULT 'proxy',
+            rule_name TEXT NOT NULL DEFAULT '',
+            policy_name TEXT NOT NULL DEFAULT '',
+            node_name TEXT NOT NULL DEFAULT '',
+            decision TEXT NOT NULL CHECK(decision IN ('block','direct','alert')),
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL CHECK(status IN ('analyzing','alerted','executed','skipped','failed')),
+            rule_content TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_traffic_anomaly_actions_created ON traffic_anomaly_actions(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_traffic_anomaly_actions_target ON traffic_anomaly_actions(host,destination_ip,created_at DESC);
+        """
+    )
+
+
+MIGRATIONS = (_migration_1, _migration_2, _migration_3, _migration_4, _migration_5, _migration_6, _migration_7, _migration_8)
 
 
 def migrate(connection: sqlite3.Connection) -> None:

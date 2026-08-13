@@ -1,4 +1,6 @@
-FROM node:24.4.1-alpine3.22 AS web
+# Node 22's Debian image still publishes amd64, arm64 and arm/v7 variants. The
+# newer Alpine image used previously did not provide arm/v7.
+FROM node:22.17.1-bookworm-slim AS web
 WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -22,7 +24,8 @@ ENV PYTHONUNBUFFERED=1 \
     EGRESSCOPE_DATA_DIR=/data
 WORKDIR /app
 COPY requirements.txt requirements.lock ./
-RUN pip install --require-hashes -r requirements.lock
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN pip install --retries 10 --timeout 60 --require-hashes -r requirements.lock
 COPY server ./server
 COPY --from=web /src/dist/client ./static
 RUN useradd --system --uid 10001 --create-home egresscope && mkdir -p /data && chown -R egresscope:egresscope /data

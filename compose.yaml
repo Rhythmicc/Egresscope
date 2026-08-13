@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mihomo
-    image: egresscope-mihomo:v1.19.29
+    image: ${EGRESSCOPE_MIHOMO_IMAGE:-rhythmlian/egresscope:mihomo-1.19.29}
     container_name: egresscope-mihomo
     network_mode: host
     cap_drop: [ALL]
@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: egresscope:local
+    image: ${EGRESSCOPE_PANEL_IMAGE:-rhythmlian/egresscope:latest}
     container_name: egresscope
     network_mode: host
     group_add:

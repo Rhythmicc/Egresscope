@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server.database import LATEST_SCHEMA_VERSION, connect, migrate
-from server.main import TrafficCollector, _connection_statistics, _gateway_events, _record_gateway_event, settings
+from server.main import RuleWorkspace, TrafficCollector, _connection_statistics, _gateway_events, _record_gateway_event, _traffic_ledger, rule_workspace, settings
 
 
 class DatabaseMigrationTests(unittest.TestCase):
@@ -21,8 +21,42 @@ class DatabaseMigrationTests(unittest.TestCase):
                 self.assertIn("traffic_class_daily_rollups", tables)
                 self.assertIn("connection_sessions", tables)
                 self.assertIn("gateway_events", tables)
+                self.assertIn("ai_settings", tables)
+                subscription_columns = {row[1] for row in connection.execute("PRAGMA table_info(subscriptions)")}
+                self.assertIn("raw_payload_json", subscription_columns)
+                self.assertIn("filter_json", subscription_columns)
                 indexes = {row[1] for row in connection.execute("PRAGMA index_list(connection_sessions)")}
                 self.assertIn("idx_connection_sessions_seen", indexes)
+                session_columns = {row[1] for row in connection.execute("PRAGMA table_info(connection_sessions)")}
+                self.assertTrue({"rule_type", "rule_payload", "rule_source", "rule_source_id", "rule_label"} <= session_columns)
+
+    def test_rule_matches_resolve_to_managed_rule_sources(self):
+        workspace = RuleWorkspace()
+        rule_set_id = "openai-rules"
+        content = {
+            "ruleSets": [{"id": rule_set_id, "name": "OpenAI", "enabled": True}],
+            "customRules": [
+                {
+                    "id": "lan-ssh",
+                    "content": "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+                    "note": "实验室内网",
+                    "enabled": True,
+                }
+            ],
+            "fallbackRules": ["GEOIP,CN,DIRECT", "MATCH,节点选择"],
+        }
+        with patch.object(workspace, "_load", return_value=content):
+            catalog = workspace.match_catalog()
+        provider = workspace.resolve_match("RuleSet", workspace.provider_id(rule_set_id), catalog)
+        custom = workspace.resolve_match("IPCIDR", "10.0.0.0/8", catalog)
+        geoip = workspace.resolve_match("GeoIP", "cn", catalog)
+        fallback = workspace.resolve_match("Match", "", catalog)
+        unknown = workspace.resolve_match("DomainSuffix", "legacy.example", catalog)
+        self.assertEqual((provider["label"], provider["source"], provider["sourceId"]), ("OpenAI", "rule-set", rule_set_id))
+        self.assertEqual((custom["label"], custom["source"]), ("实验室内网", "custom"))
+        self.assertEqual((geoip["label"], geoip["source"]), ("国内 IP 兜底", "fallback"))
+        self.assertEqual((fallback["label"], fallback["source"]), ("最终兜底", "fallback"))
+        self.assertEqual((unknown["label"], unknown["source"]), ("域名后缀 · legacy.example", "unmanaged"))
 
     def test_collector_flush_preserves_gateway_byte_totals(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -43,6 +77,26 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(total, (1000, 2000))
             self.assertEqual(classes["proxy"], 2700)
             self.assertEqual(classes["unknown"], 300)
+
+    def test_collector_persists_structured_rule_match_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            test_settings = replace(settings, data_dir=Path(directory))
+            database = Path(directory) / "egresscope.db"
+            with connect(database) as connection:
+                migrate(connection)
+            session = (
+                "connection-1", "192.168.31.42", "chatgpt.com", "1.1.1.1", "443", "tcp",
+                "OpenAI", '["节点选择","美国"]', 1_786_399_900, 1_786_400_000, 100, 900,
+                "RULE-SET", "ssslab-example", "rule-set", "openai-rules", "OpenAI",
+            )
+            collector = TrafficCollector()
+            with patch("server.main.settings", test_settings):
+                collector._persist(1_786_400_000, 0, 0, 10, [], [], [], [session], (0, 0))
+            with connect(database) as connection:
+                row = connection.execute(
+                    "SELECT rule,rule_type,rule_payload,rule_source,rule_source_id,rule_label FROM connection_sessions"
+                ).fetchone()
+            self.assertEqual(tuple(row), ("OpenAI", "RULE-SET", "ssslab-example", "rule-set", "openai-rules", "OpenAI"))
 
     def test_connection_statistics_keeps_history_for_thirty_days_and_scopes_viewers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -81,6 +135,50 @@ class DatabaseMigrationTests(unittest.TestCase):
                 remaining = {row[0] for row in connection.execute("SELECT id FROM connection_sessions")}
             self.assertNotIn("expired", remaining)
             self.assertIn("recent", remaining)
+
+    def test_traffic_ledger_keeps_device_target_rule_and_exit_in_one_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(
+                settings,
+                data_dir=data_dir,
+                device_aliases_path=data_dir / "devices.json",
+                retention_days=30,
+            )
+            now = 1_786_400_000
+            with connect(database) as connection:
+                migrate(connection)
+                connection.executemany(
+                    """
+                    INSERT INTO connection_sessions(
+                        id,device,host,destination_ip,destination_port,network,rule,chain,
+                        started_at,last_seen_at,ended_at,upload_bytes,download_bytes,
+                        rule_type,rule_payload,rule_source,rule_source_id,rule_label
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        ("model-download", "192.168.31.42", "huggingface.co", "1.1.1.1", "443", "tcp", "AI 模型", '["节点选择","美国最佳","us-lax-03"]', now - 600, now - 10, now - 10, 1024, 8 * 1024**3, "RuleSet", "ssslab-ai", "rule-set", "ai", "AI 模型"),
+                        ("direct", "192.168.31.42", "mirrors.local", "192.168.31.9", "443", "tcp", "实验室内网", '["全球直连","DIRECT"]', now - 300, now - 5, now - 5, 100, 200, "DomainSuffix", "local", "custom", "lan", "实验室内网"),
+                        ("other-device", "192.168.31.225", "example.com", "2.2.2.2", "443", "tcp", "最终兜底", '["节点选择","香港最佳","hk-01"]', now - 200, now - 5, now - 5, 300, 400, "Match", "", "fallback", "fallback-0", "最终兜底"),
+                    ),
+                )
+            catalog = {
+                "providers": {"ssslab-ai": {"label": "AI 模型", "source": "rule-set", "sourceId": "ai", "sourceLabel": "规则集", "detail": "规则集 #01"}},
+                "custom": {},
+                "fallback": {},
+            }
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now), patch.object(rule_workspace, "summary", return_value={"availablePolicies": ["节点选择", "美国最佳", "香港最佳", "全球直连"]}), patch.object(rule_workspace, "match_catalog", return_value=catalog):
+                proxy = _traffic_ledger({"role": "viewer", "allowedDevices": ["192.168.31.42"]}, "24h", "proxy", "traffic", "", "", 100, 0)
+                direct = _traffic_ledger({"role": "viewer", "allowedDevices": ["192.168.31.42"]}, "24h", "direct", "traffic", "", "", 100, 0)
+            self.assertEqual(proxy["summary"]["events"], 1)
+            self.assertEqual(proxy["events"][0]["host"], "huggingface.co")
+            self.assertEqual(proxy["events"][0]["device"], "192.168.31.42")
+            self.assertEqual(proxy["events"][0]["rule"], "AI 模型")
+            self.assertEqual(proxy["events"][0]["policy"], "美国最佳")
+            self.assertEqual(proxy["events"][0]["node"], "us-lax-03")
+            self.assertEqual(proxy["events"][0]["traffic"], 8 * 1024**3 + 1024)
+            self.assertEqual(direct["events"][0]["route"], "direct")
 
     def test_gateway_events_are_persistent_filterable_and_deduplicated(self):
         with tempfile.TemporaryDirectory() as directory:

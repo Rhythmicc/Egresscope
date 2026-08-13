@@ -1,12 +1,24 @@
 const request = async (path, options = {}) => {
+  const {
+    timeoutMs = 12_000,
+    timeoutMessage = "控制面响应超时",
+    signal: externalSignal,
+    ...fetchOptions
+  } = options;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12_000);
+  let timedOut = false;
+  const abortFromCaller = () => controller.abort(externalSignal?.reason);
+  externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   try {
     const response = await fetch(path, {
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-      ...options,
-      signal: options.signal || controller.signal,
+      headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
+      signal: controller.signal,
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -16,10 +28,14 @@ const request = async (path, options = {}) => {
     }
     return response.json();
   } catch (error) {
-    if (error.name === "AbortError") throw new Error("控制面响应超时");
+    if (error.name === "AbortError") {
+      if (timedOut) throw new Error(timeoutMessage);
+      throw new Error("请求已取消");
+    }
     throw error;
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromCaller);
   }
 };
 
@@ -31,6 +47,8 @@ export const api = {
   createUser: (payload) => request("/api/users", { method: "POST", body: JSON.stringify(payload) }),
   updateUser: (id, payload) => request(`/api/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   subscriptions: () => request("/api/subscriptions"),
+  aiSettings: () => request("/api/ai/settings"),
+  updateAISettings: (payload) => request("/api/ai/settings", { method: "PUT", body: JSON.stringify(payload) }),
   createSubscription: (payload) => request("/api/subscriptions", { method: "POST", body: JSON.stringify(payload) }),
   updateSubscription: (id, payload) => request(`/api/subscriptions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteSubscription: (id) => request(`/api/subscriptions/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -38,6 +56,15 @@ export const api = {
   activateSubscription: (id) => request(`/api/subscriptions/${encodeURIComponent(id)}/activate`, { method: "POST" }),
   deactivateSubscription: (id) => request(`/api/subscriptions/${encodeURIComponent(id)}/deactivate`, { method: "POST" }),
   rotateSubscriptionToken: (id) => request(`/api/subscriptions/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
+  subscriptionFilter: (id) => request(`/api/subscriptions/${encodeURIComponent(id)}/filter`),
+  previewSubscriptionFilter: (id, payload) => request(`/api/subscriptions/${encodeURIComponent(id)}/filter/preview`, { method: "POST", body: JSON.stringify(payload) }),
+  updateSubscriptionFilter: (id, payload) => request(`/api/subscriptions/${encodeURIComponent(id)}/filter`, { method: "PUT", body: JSON.stringify(payload) }),
+  analyzeSubscriptionFilter: (id, instruction = "") => request(`/api/subscriptions/${encodeURIComponent(id)}/analyze-filter`, {
+    method: "POST",
+    body: JSON.stringify({ instruction }),
+    timeoutMs: 55_000,
+    timeoutMessage: "AI 节点分析等待超时，请稍后重试",
+  }),
   dashboard: (range = "live") => request(`/api/dashboard?range=${encodeURIComponent(range)}`),
   strategies: () => request("/api/strategies"),
   selectStrategy: (group, name, reconnect = true) => request(`/api/strategies/${encodeURIComponent(group)}`, { method: "PUT", body: JSON.stringify({ name, reconnect }) }),
@@ -72,7 +99,15 @@ export const api = {
     if (attributionPeriod) query.set("attributionPeriod", attributionPeriod);
     return request(`/api/traffic-analysis?${query}`);
   },
+  trafficLedger: ({ range, route = "proxy", order = "traffic", device = "", query = "", limit = 100, offset = 0 }) => {
+    const search = new URLSearchParams({ range, route, order, limit: String(limit), offset: String(offset) });
+    if (device) search.set("device", device);
+    if (query) search.set("query", query);
+    return request(`/api/traffic-ledger?${search}`);
+  },
   trafficHistory: () => request("/api/traffic-history"),
+  trafficAnomalies: (limit = 50) => request(`/api/traffic-anomalies?limit=${encodeURIComponent(limit)}`),
+  updateTrafficAnomalySettings: (payload) => request("/api/traffic-anomalies/settings", { method: "PUT", body: JSON.stringify(payload) }),
   device: (ip, range = "live") => request(`/api/devices/${encodeURIComponent(ip)}?range=${encodeURIComponent(range)}`),
 };
 

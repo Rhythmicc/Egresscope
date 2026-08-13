@@ -1,15 +1,27 @@
 FROM alpine:3.22.1
 
 ARG TARGETARCH
+ARG TARGETVARIANT
 ARG MIHOMO_VERSION=v1.19.29
 ARG MIHOMO_SHA256_AMD64=60de76a35a6cbf7b4fa4a20f5c257c24345d1d635ab1aa3877022a1997ef413c
 ARG MIHOMO_SHA256_ARM64=9a868b5e4e0ad91d9d71e1b41b0cfce78aaba44360c30df74a723f8e3926a86c
+ARG MIHOMO_SHA256_ARMV7=9e2b975a5513c9fc0012f6600552329e311282455f90474b7220d21deb049ecd
 
 RUN apk add --no-cache ca-certificates tzdata \
-    && case "$TARGETARCH" in \
+    && target="${TARGETARCH}${TARGETVARIANT}" \
+    && if [ -z "$target" ]; then \
+         case "$(apk --print-arch)" in \
+           x86_64) target=amd64 ;; \
+           aarch64) target=arm64 ;; \
+           armv7) target=armv7 ;; \
+           *) target="$(apk --print-arch)" ;; \
+         esac; \
+       fi \
+    && case "$target" in \
       amd64) asset="mihomo-linux-amd64-${MIHOMO_VERSION}.gz"; checksum="$MIHOMO_SHA256_AMD64" ;; \
       arm64) asset="mihomo-linux-arm64-${MIHOMO_VERSION}.gz"; checksum="$MIHOMO_SHA256_ARM64" ;; \
-      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+      armv7) asset="mihomo-linux-armv7-${MIHOMO_VERSION}.gz"; checksum="$MIHOMO_SHA256_ARMV7" ;; \
+      *) echo "unsupported architecture: $target" >&2; exit 1 ;; \
     esac \
     && wget -q "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${asset}" -O /tmp/mihomo.gz \
     && echo "${checksum}  /tmp/mihomo.gz" | sha256sum -c - \

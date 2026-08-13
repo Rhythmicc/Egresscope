@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
-import hmac
 import ipaddress
 import json
 import logging
@@ -15,7 +13,6 @@ import threading
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -29,46 +26,45 @@ import yaml
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-
+from .auth import AuthStore as AuthRepository
+from .auth import LoginRateLimiter
+from .config import Settings
 from .database import connect as connect_database
 from .database import migrate as migrate_database
+from .mihomo import MihomoClient
+from .schemas import (
+    AISettingsRequest,
+    CreateUserRequest,
+    CustomRuleRequest,
+    CustomRuleUpdateRequest,
+    DeviceAliasesRequest,
+    LoginRequest,
+    RuleMoveRequest,
+    RuleSetRequest,
+    RuleSetUpdateRequest,
+    StrategySelectRequest,
+    SubscriptionRequest,
+    SubscriptionAIAnalyzeRequest,
+    SubscriptionFilterRequest,
+    SubscriptionUpdateRequest,
+    TrafficAnomalySettingsRequest,
+    UpdateUserRequest,
+)
+from .subscription_ai import (
+    AISettingsStore,
+    SubscriptionAIAnalyzer,
+    apply_node_filter,
+    normalize_filter,
+)
+from .traffic_anomaly import (
+    TrafficAnomalyAnalyzer,
+    TrafficAnomalyStore,
+    is_protected_target,
+    target_rule,
+)
 
 
 logger = logging.getLogger("egresscope")
-
-
-def _env(name: str, legacy: str, default: str = "") -> str:
-    return os.getenv(name, os.getenv(legacy, default))
-
-
-@dataclass(frozen=True)
-class Settings:
-    controller_url: str = os.getenv("MIHOMO_CONTROLLER_URL", "http://127.0.0.1:9090").rstrip("/")
-    controller_secret: str = os.getenv("MIHOMO_CONTROLLER_SECRET", "")
-    allow_insecure_controller: bool = os.getenv("MIHOMO_ALLOW_INSECURE_CONTROLLER", "false").lower() == "true"
-    config_path: Path = Path(os.getenv("MIHOMO_CONFIG_PATH", "/mihomo/config.yaml"))
-    data_dir: Path = Path(_env("EGRESSCOPE_DATA_DIR", "SSSLAB_DATA_DIR", "/data"))
-    static_dir: Path = Path(_env("EGRESSCOPE_STATIC_DIR", "SSSLAB_STATIC_DIR", "/app/static"))
-    session_secret: str = _env("EGRESSCOPE_SESSION_SECRET", "SSSLAB_SESSION_SECRET")
-    admin_username: str = _env("EGRESSCOPE_ADMIN_USERNAME", "SSSLAB_ADMIN_USERNAME", "admin")
-    admin_password: str = _env("EGRESSCOPE_ADMIN_PASSWORD", "SSSLAB_ADMIN_PASSWORD")
-    secure_cookie: bool = _env("EGRESSCOPE_SECURE_COOKIE", "SSSLAB_SECURE_COOKIE", "true").lower() == "true"
-    retention_days: int = int(_env("EGRESSCOPE_AUDIT_RETENTION_DAYS", "SSSLAB_AUDIT_RETENTION_DAYS", "30"))
-    event_retention_days: int = int(_env("EGRESSCOPE_EVENT_RETENTION_DAYS", "SSSLAB_EVENT_RETENTION_DAYS", "90"))
-    poll_interval: float = float(_env("EGRESSCOPE_POLL_INTERVAL", "SSSLAB_POLL_INTERVAL", "2"))
-    device_aliases_path: Path = Path(_env("EGRESSCOPE_DEVICE_ALIASES", "SSSLAB_DEVICE_ALIASES", "/data/devices.json"))
-    default_rule_sets_path: Path = Path(_env("EGRESSCOPE_DEFAULT_RULE_SETS", "SSSLAB_DEFAULT_RULE_SETS", str(Path(__file__).with_name("default-rule-sets.json"))))
-    timezone: str = _env("EGRESSCOPE_TIMEZONE", "SSSLAB_TIMEZONE", "Asia/Shanghai")
-    lan_network: str = _env("EGRESSCOPE_LAN_NETWORK", "SSSLAB_LAN_NETWORK", "192.168.31.0/24")
-    subscription_allowed_ports: str = _env("EGRESSCOPE_SUBSCRIPTION_ALLOWED_PORTS", "SSSLAB_SUBSCRIPTION_ALLOWED_PORTS", "80,443,8080,8443")
-    infrastructure_source_ips: str = os.getenv(
-        "EGRESSCOPE_INFRASTRUCTURE_SOURCE_IPS",
-        os.getenv(
-            "SSSLAB_INFRASTRUCTURE_SOURCE_IPS",
-        "127.0.0.1,::1,198.18.0.1,172.17.0.2,172.18.0.3",
-        ),
-    )
 
 
 settings = Settings()
@@ -95,6 +91,15 @@ CONNECTION_HISTORY_RANGES = {
     "24h": 24 * 60 * 60,
     "7d": 7 * 24 * 60 * 60,
     "30d": 30 * 24 * 60 * 60,
+}
+TRAFFIC_LEDGER_RANGES = {
+    "live": 15 * 60,
+    "1h": 60 * 60,
+    "6h": 6 * 60 * 60,
+    "24h": 24 * 60 * 60,
+    "7d": 7 * 24 * 60 * 60,
+    "14d": 14 * 24 * 60 * 60,
+    "month": 30 * 24 * 60 * 60,
 }
 
 
@@ -259,241 +264,18 @@ def _backfill_daily_rollups(connection: sqlite3.Connection) -> None:
     )
 
 
-def _password_hash(password: str, salt: bytes | None = None) -> str:
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 420_000)
-    return f"pbkdf2_sha256$420000${base64.urlsafe_b64encode(salt).decode()}${base64.urlsafe_b64encode(digest).decode()}"
+class AuthStore(AuthRepository):
+    """Compatibility composition wrapper; implementation lives in server.auth."""
 
-
-def _password_matches(password: str, encoded: str) -> bool:
-    try:
-        _, rounds, salt, expected = encoded.split("$", 3)
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), base64.urlsafe_b64decode(salt), int(rounds))
-        return hmac.compare_digest(base64.urlsafe_b64encode(digest).decode(), expected)
-    except (ValueError, TypeError):
-        return False
-
-
-class AuthStore:
     def __init__(self) -> None:
-        self.session_secret = settings.session_secret
-
-    def initialize(self) -> None:
-        if len(self.session_secret) < 32:
-            raise RuntimeError("EGRESSCOPE_SESSION_SECRET is required and must contain at least 32 characters")
-        with _db() as connection:
-            migrate_database(connection)
-            database_path = Path(connection.execute("PRAGMA database_list").fetchone()[2])
-            os.chmod(database_path, 0o600)
-            _backfill_daily_rollups(connection)
-            count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            if count == 0:
-                if not settings.admin_password:
-                    raise RuntimeError("EGRESSCOPE_ADMIN_PASSWORD is required for the initial administrator")
-                connection.execute(
-                    "INSERT INTO users(username,password_hash,role,allowed_devices,created_at) VALUES(?,?,?,?,?)",
-                    (settings.admin_username, _password_hash(settings.admin_password), "admin", "[]", int(time.time())),
-                )
-
-    def authenticate(self, username: str, password: str) -> dict[str, Any] | None:
-        with _db() as connection:
-            row = connection.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-        if not row or not _password_matches(password, row["password_hash"]):
-            return None
-        return self.public_user(row)
-
-    def list_users(self) -> list[dict[str, Any]]:
-        with _db() as connection:
-            rows = connection.execute("SELECT * FROM users ORDER BY created_at, id").fetchall()
-        return [self.public_user(row) for row in rows]
-
-    def create_user(self, username: str, password: str, role: str, allowed_devices: list[str]) -> dict[str, Any]:
-        username = username.strip()
-        if not re.fullmatch(r"[A-Za-z0-9._-]{3,64}", username):
-            raise ValueError("用户名只能包含字母、数字、点、下划线和连字符，长度 3–64 位")
-        if len(password) < 12:
-            raise ValueError("密码至少需要 12 个字符")
-        if role not in {"admin", "viewer"}:
-            raise ValueError("角色必须是 admin 或 viewer")
-        allowed = sorted({item.strip() for item in allowed_devices if item.strip()})
-        try:
-            with _db() as connection:
-                cursor = connection.execute(
-                    "INSERT INTO users(username,password_hash,role,allowed_devices,created_at) VALUES(?,?,?,?,?)",
-                    (username, _password_hash(password), role, json.dumps(allowed), int(time.time())),
-                )
-                row = connection.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone()
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("用户名已存在") from exc
-        return self.public_user(row)
-
-    def update_user(self, user_id: int, role: str | None, allowed_devices: list[str] | None, password: str | None) -> dict[str, Any]:
-        updates: list[str] = []
-        values: list[Any] = []
-        if role is not None:
-            if role not in {"admin", "viewer"}:
-                raise ValueError("角色必须是 admin 或 viewer")
-            updates.append("role = ?")
-            values.append(role)
-        if allowed_devices is not None:
-            updates.append("allowed_devices = ?")
-            values.append(json.dumps(sorted({item.strip() for item in allowed_devices if item.strip()})))
-        if password is not None:
-            if len(password) < 12:
-                raise ValueError("密码至少需要 12 个字符")
-            updates.append("password_hash = ?")
-            values.append(_password_hash(password))
-            updates.append("session_version = session_version + 1")
-        if not updates:
-            raise ValueError("没有需要更新的字段")
-        values.append(user_id)
-        with _db() as connection:
-            result = connection.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", values)
-            if result.rowcount != 1:
-                raise ValueError("用户不存在")
-            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        return self.public_user(row)
-
-    @staticmethod
-    def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-        return {
-            "id": row["id"],
-            "username": row["username"],
-            "role": row["role"],
-            "allowedDevices": json.loads(row["allowed_devices"] or "[]"),
-        }
-
-    def token(self, user: dict[str, Any]) -> str:
-        with _db() as connection:
-            row = connection.execute("SELECT session_version FROM users WHERE id = ?", (user["id"],)).fetchone()
-        if row is None:
-            raise ValueError("user no longer exists")
-        payload = json.dumps(
-            {"sub": user["id"], "ver": int(row["session_version"]), "exp": int(time.time()) + 12 * 3600},
-            separators=(",", ":"),
-        ).encode()
-        encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
-        signature = hmac.new(self.session_secret.encode(), encoded, hashlib.sha256).digest()
-        return f"{encoded.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
-
-    def verify(self, token: str | None) -> dict[str, Any] | None:
-        if not token:
-            return None
-        try:
-            encoded, signature = token.split(".", 1)
-            expected = hmac.new(self.session_secret.encode(), encoded.encode(), hashlib.sha256).digest()
-            actual = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
-            if not hmac.compare_digest(expected, actual):
-                return None
-            payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
-            if payload["exp"] < time.time():
-                return None
-            with _db() as connection:
-                row = connection.execute("SELECT * FROM users WHERE id = ?", (payload["sub"],)).fetchone()
-            if not row or int(payload.get("ver", 0)) != int(row["session_version"]):
-                return None
-            return self.public_user(row)
-        except (ValueError, KeyError, json.JSONDecodeError):
-            return None
+        super().__init__(lambda: settings, _db, migrate_database, _backfill_daily_rollups)
 
 
 auth = AuthStore()
-
-
-class LoginRateLimiter:
-    """Small in-process limiter for the single-worker appliance deployment."""
-
-    def __init__(self, attempts: int = 8, window_seconds: int = 300) -> None:
-        self.attempts = attempts
-        self.window_seconds = window_seconds
-        self._failures: dict[str, deque[float]] = defaultdict(deque)
-        self._lock = threading.Lock()
-
-    def check(self, key: str) -> int:
-        now = time.monotonic()
-        with self._lock:
-            failures = self._failures[key]
-            while failures and failures[0] <= now - self.window_seconds:
-                failures.popleft()
-            if len(failures) < self.attempts:
-                return 0
-            return max(1, round(self.window_seconds - (now - failures[0])))
-
-    def failure(self, key: str) -> None:
-        with self._lock:
-            self._failures[key].append(time.monotonic())
-
-    def success(self, key: str) -> None:
-        with self._lock:
-            self._failures.pop(key, None)
-
-
 login_limiter = LoginRateLimiter()
 
 
-class MihomoClient:
-    def __init__(self) -> None:
-        self.client: httpx.AsyncClient | None = None
-
-    async def start(self) -> None:
-        headers = {"Authorization": f"Bearer {settings.controller_secret}"} if settings.controller_secret else {}
-        self.client = httpx.AsyncClient(base_url=settings.controller_url, headers=headers, timeout=8)
-
-    async def close(self) -> None:
-        if self.client:
-            await self.client.aclose()
-
-    async def get(self, path: str) -> dict[str, Any]:
-        if not self.client:
-            raise RuntimeError("mihomo client is not started")
-        response = await self.client.get(path)
-        response.raise_for_status()
-        return response.json()
-
-    async def select(self, group: str, name: str) -> None:
-        if not self.client:
-            raise RuntimeError("mihomo client is not started")
-        response = await self.client.put(f"/proxies/{quote(group, safe='')}", json={"name": name})
-        response.raise_for_status()
-
-    async def reload_config(self, payload: str) -> None:
-        if not self.client:
-            raise RuntimeError("mihomo client is not started")
-        response = await self.client.put("/configs?force=true", json={"payload": payload})
-        response.raise_for_status()
-
-    async def refresh_rule_provider(self, provider: str) -> None:
-        if not self.client:
-            raise RuntimeError("mihomo client is not started")
-        response = await self.client.put(f"/providers/rules/{quote(provider, safe='')}")
-        response.raise_for_status()
-
-    async def delete(self, path: str) -> None:
-        if not self.client:
-            raise RuntimeError("mihomo client is not started")
-        response = await self.client.delete(path)
-        response.raise_for_status()
-
-    async def close_connections(self, connection_ids: list[str]) -> tuple[int, int]:
-        semaphore = asyncio.Semaphore(16)
-
-        async def close_one(connection_id: str) -> bool:
-            async with semaphore:
-                try:
-                    await self.delete(f"/connections/{quote(connection_id, safe='')}")
-                    return True
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 404:  # connection ended on its own
-                        return False
-                    raise
-
-        results = await asyncio.gather(*(close_one(connection_id) for connection_id in connection_ids), return_exceptions=True)
-        closed = sum(result is True for result in results)
-        failed = sum(isinstance(result, Exception) for result in results)
-        return closed, failed
-
-
-mihomo = MihomoClient()
+mihomo = MihomoClient(settings.controller_url, settings.controller_secret)
 
 
 RULE_OPTIONS = {"no-resolve"}
@@ -541,6 +323,53 @@ def _parsed_rule(content: str) -> dict[str, Any]:
     policy = parts[policy_index] if policy_index >= 1 else ""
     matcher = ",".join(parts[1:policy_index]) if policy_index > 1 else ""
     return {"type": rule_type, "matcher": matcher, "policy": policy, "options": parts[option_start:]}
+
+
+RULE_TYPE_ALIASES = {
+    "RULESET": "RULE-SET",
+    "DOMAIN": "DOMAIN",
+    "DOMAINSUFFIX": "DOMAIN-SUFFIX",
+    "DOMAINKEYWORD": "DOMAIN-KEYWORD",
+    "DOMAINREGEX": "DOMAIN-REGEX",
+    "GEOSITE": "GEOSITE",
+    "GEOIP": "GEOIP",
+    "IPCIDR": "IP-CIDR",
+    "IPCIDR6": "IP-CIDR6",
+    "SRCIPCIDR": "SRC-IP-CIDR",
+    "DSTPORT": "DST-PORT",
+    "SRCPORT": "SRC-PORT",
+    "PROCESSNAME": "PROCESS-NAME",
+    "PROCESSPATH": "PROCESS-PATH",
+    "NETWORK": "NETWORK",
+    "MATCH": "MATCH",
+    "AND": "AND",
+    "OR": "OR",
+    "NOT": "NOT",
+}
+
+RULE_TYPE_LABELS = {
+    "RULE-SET": "规则集",
+    "DOMAIN": "域名",
+    "DOMAIN-SUFFIX": "域名后缀",
+    "DOMAIN-KEYWORD": "域名关键词",
+    "DOMAIN-REGEX": "域名正则",
+    "GEOSITE": "GeoSite",
+    "GEOIP": "GeoIP",
+    "IP-CIDR": "目标网段",
+    "IP-CIDR6": "IPv6 网段",
+    "SRC-IP-CIDR": "来源网段",
+    "DST-PORT": "目标端口",
+    "SRC-PORT": "来源端口",
+    "PROCESS-NAME": "进程名称",
+    "PROCESS-PATH": "进程路径",
+    "NETWORK": "网络类型",
+    "MATCH": "最终匹配",
+}
+
+
+def _canonical_rule_type(value: str) -> str:
+    raw = re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
+    return RULE_TYPE_ALIASES.get(raw, (value or "UNKNOWN").upper())
 
 
 SUBSCRIPTION_MAX_BYTES = 8 * 1024 * 1024
@@ -1151,11 +980,22 @@ class SubscriptionStore:
     def _public(row: sqlite3.Row) -> dict[str, Any]:
         usage = json.loads(row["usage_json"] or "{}")
         nodes = json.loads(row["payload_json"] or "[]")
+        raw_nodes = json.loads(row["raw_payload_json"] or row["payload_json"] or "[]")
+        filter_config = normalize_filter(json.loads(row["filter_json"] or "{}"))
+        _, filter_preview = apply_node_filter(raw_nodes, filter_config, allow_empty=True)
+        ai_analysis = json.loads(row["ai_analysis_json"] or "{}")
         return {
             "id": row["id"], "ownerId": row["owner_id"], "owner": row["owner_name"], "name": row["name"],
             "maskedUrl": _masked_subscription_url(row["url"]), "interval": row["interval_seconds"], "enabled": bool(row["enabled"]),
             "gatewayEnabled": bool(row["gateway_enabled"]), "sourceFormat": row["source_format"], "nodeCount": row["node_count"],
-            "nodePreview": [item.get("name") for item in nodes[:8]], "usage": usage, "fetchedAt": row["fetched_at"],
+            "rawNodeCount": len(raw_nodes), "nodePreview": [item.get("name") for item in nodes[:8]],
+            "filter": filter_config, "filterSource": row["filter_source"], "filterPreview": filter_preview,
+            "aiAnalysis": {
+                key: ai_analysis.get(key)
+                for key in ("reason", "confidence", "provider", "model", "analyzedAt")
+                if ai_analysis.get(key) is not None
+            },
+            "usage": usage, "fetchedAt": row["fetched_at"],
             "nextRefreshAt": row["next_refresh_at"], "lastError": row["last_error"], "updatedAt": row["updated_at"],
             "deliveryPaths": {
                 "clash": f"/sub/{row['delivery_token']}/clash.yaml",
@@ -1258,12 +1098,24 @@ class SubscriptionStore:
         try:
             async with SUBSCRIPTION_REFRESH_SEMAPHORE:
                 content, usage = await _download_subscription(str(row["url"]))
-                source_format, nodes = _parse_subscription(content)
+                source_format, raw_nodes = _parse_subscription(content)
+                filter_config = normalize_filter(json.loads(row["filter_json"] or "{}"))
+                nodes, _ = apply_node_filter(raw_nodes, filter_config)
                 now = int(time.time())
                 with _db() as connection:
                     connection.execute(
-                        "UPDATE subscriptions SET source_format=?,node_count=?,payload_json=?,usage_json=?,fetched_at=?,next_refresh_at=?,last_error=NULL,updated_at=? WHERE id=?",
-                        (source_format, len(nodes), json.dumps(nodes, ensure_ascii=False, separators=(",", ":")), json.dumps(usage, separators=(",", ":")), now, now + int(row["interval_seconds"]), now, subscription_id),
+                        "UPDATE subscriptions SET source_format=?,node_count=?,raw_payload_json=?,payload_json=?,usage_json=?,fetched_at=?,next_refresh_at=?,last_error=NULL,updated_at=? WHERE id=?",
+                        (
+                            source_format,
+                            len(nodes),
+                            json.dumps(raw_nodes, ensure_ascii=False, separators=(",", ":")),
+                            json.dumps(nodes, ensure_ascii=False, separators=(",", ":")),
+                            json.dumps(usage, separators=(",", ":")),
+                            now,
+                            now + int(row["interval_seconds"]),
+                            now,
+                            subscription_id,
+                        ),
                     )
         except Exception as exc:
             now = int(time.time())
@@ -1273,6 +1125,83 @@ class SubscriptionStore:
         refreshed = self._row(subscription_id)
         assert refreshed is not None
         return self._public(refreshed)
+
+    def filter_workspace(self, subscription_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        row = self._authorize(self._row(subscription_id), user)
+        raw_nodes = json.loads(row["raw_payload_json"] or row["payload_json"] or "[]")
+        filter_config = normalize_filter(json.loads(row["filter_json"] or "{}"))
+        _, preview = apply_node_filter(raw_nodes, filter_config, allow_empty=True)
+        return {
+            "subscription": self._public(row),
+            "filter": filter_config,
+            "preview": preview,
+        }
+
+    def preview_filter(
+        self,
+        subscription_id: str,
+        user: dict[str, Any],
+        filter_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        row = self._authorize(self._row(subscription_id), user)
+        raw_nodes = json.loads(row["raw_payload_json"] or row["payload_json"] or "[]")
+        if not raw_nodes:
+            raise ValueError("请先成功刷新订阅，再预览节点过滤")
+        normalized = normalize_filter(filter_config)
+        _, preview = apply_node_filter(raw_nodes, normalized, allow_empty=True)
+        return {"filter": normalized, "preview": preview}
+
+    def update_filter(
+        self,
+        subscription_id: str,
+        user: dict[str, Any],
+        filter_config: dict[str, Any],
+        source: str = "manual",
+    ) -> dict[str, Any]:
+        row = self._authorize(self._row(subscription_id), user)
+        raw_nodes = json.loads(row["raw_payload_json"] or row["payload_json"] or "[]")
+        if not raw_nodes:
+            raise ValueError("请先成功刷新订阅，再配置节点过滤")
+        normalized = normalize_filter(filter_config)
+        nodes, preview = apply_node_filter(raw_nodes, normalized)
+        now = int(time.time())
+        with _db() as connection:
+            connection.execute(
+                """
+                UPDATE subscriptions
+                SET filter_json=?,filter_source=?,filter_updated_at=?,payload_json=?,node_count=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+                    source if source in {"manual", "ai"} else "manual",
+                    now,
+                    json.dumps(nodes, ensure_ascii=False, separators=(",", ":")),
+                    len(nodes),
+                    now,
+                    subscription_id,
+                ),
+            )
+        result = self.get(subscription_id, user)
+        result["filterPreview"] = preview
+        return result
+
+    def ai_inventory(self, subscription_id: str, user: dict[str, Any]) -> tuple[sqlite3.Row, list[dict[str, Any]], dict[str, Any]]:
+        row = self._authorize(self._row(subscription_id), user)
+        raw_nodes = json.loads(row["raw_payload_json"] or row["payload_json"] or "[]")
+        if not raw_nodes:
+            raise ValueError("请先成功刷新订阅，再让 AI 分析节点")
+        filter_config = normalize_filter(json.loads(row["filter_json"] or "{}"))
+        return row, raw_nodes, filter_config
+
+    def save_ai_analysis(self, subscription_id: str, analysis: dict[str, Any]) -> None:
+        with _db() as connection:
+            result = connection.execute(
+                "UPDATE subscriptions SET ai_analysis_json=?,updated_at=? WHERE id=?",
+                (json.dumps(analysis, ensure_ascii=False, separators=(",", ":")), int(time.time()), subscription_id),
+            )
+        if result.rowcount != 1:
+            raise KeyError(subscription_id)
 
     def due(self) -> list[str]:
         with _db() as connection:
@@ -1300,6 +1229,22 @@ class SubscriptionStore:
 
 
 subscriptions = SubscriptionStore()
+ai_settings = AISettingsStore(_db)
+subscription_ai = SubscriptionAIAnalyzer(ai_settings)
+traffic_anomalies = TrafficAnomalyStore(_db)
+traffic_anomaly_ai = TrafficAnomalyAnalyzer(ai_settings)
+AI_ANALYSIS_SEMAPHORE = asyncio.Semaphore(2)
+AI_ANALYSIS_LAST_RUN: dict[int, float] = {}
+AI_ANALYSIS_RATE_LOCK = threading.Lock()
+
+
+def _claim_ai_analysis(user_id: int) -> None:
+    now = time.monotonic()
+    with AI_ANALYSIS_RATE_LOCK:
+        previous = AI_ANALYSIS_LAST_RUN.get(user_id, 0)
+        if now - previous < 20:
+            raise ValueError(f"AI 分析请求过于频繁，请在 {max(1, round(20 - (now - previous)))} 秒后重试")
+        AI_ANALYSIS_LAST_RUN[user_id] = now
 
 
 def _serialized_rule_operation(method: Any) -> Any:
@@ -1383,6 +1328,99 @@ class RuleWorkspace:
     @staticmethod
     def provider_id(rule_set_id: str) -> str:
         return "ssslab-" + hashlib.sha1(rule_set_id.encode()).hexdigest()[:12]
+
+    def match_catalog(self) -> dict[str, Any]:
+        workspace = self._load()
+        assert workspace is not None
+        providers: dict[str, dict[str, Any]] = {}
+        custom: dict[tuple[str, str], dict[str, Any]] = {}
+        fallback: dict[tuple[str, str], dict[str, Any]] = {}
+        for index, item in enumerate(workspace.get("ruleSets") or []):
+            item_id = str(item.get("id") or "")
+            providers[self.provider_id(item_id)] = {
+                "label": str(item.get("name") or f"规则集 {index + 1}"),
+                "source": "rule-set",
+                "sourceId": item_id,
+                "sourceLabel": "规则集",
+                "detail": f"规则集 #{index + 1:02d}",
+            }
+        for index, item in enumerate(workspace.get("customRules") or []):
+            if not item.get("enabled", True):
+                continue
+            parsed = _parsed_rule(str(item.get("content") or ""))
+            key = (_canonical_rule_type(parsed["type"]), str(parsed["matcher"]).casefold())
+            custom[key] = {
+                "label": str(item.get("note") or f"自定义规则 {index + 1}"),
+                "source": "custom",
+                "sourceId": str(item.get("id") or ""),
+                "sourceLabel": "自定义规则",
+                "detail": str(item.get("content") or ""),
+            }
+        for index, content in enumerate(workspace.get("fallbackRules") or []):
+            parsed = _parsed_rule(str(content))
+            rule_type = _canonical_rule_type(parsed["type"])
+            matcher = str(parsed["matcher"])
+            if rule_type == "MATCH":
+                label = "最终兜底"
+            elif rule_type == "GEOIP" and matcher.casefold() == "cn":
+                label = "国内 IP 兜底"
+            else:
+                label = f"安全兜底 {index + 1}"
+            fallback[(rule_type, matcher.casefold())] = {
+                "label": label,
+                "source": "fallback",
+                "sourceId": f"fallback-{index}",
+                "sourceLabel": "安全兜底",
+                "detail": str(content),
+            }
+        return {"providers": providers, "custom": custom, "fallback": fallback}
+
+    def resolve_match(
+        self,
+        rule_type: str,
+        rule_payload: str,
+        catalog: dict[str, Any] | None = None,
+        stored_label: str = "",
+    ) -> dict[str, str]:
+        catalog = catalog or self.match_catalog()
+        raw_type = str(rule_type or "").strip()
+        payload = str(rule_payload or "").strip()
+        canonical = _canonical_rule_type(raw_type) if raw_type else ""
+        match: dict[str, Any] | None = None
+        if canonical == "RULE-SET":
+            match = catalog["providers"].get(payload)
+        if match is None and canonical:
+            key = (canonical, payload.casefold())
+            match = catalog["custom"].get(key) or catalog["fallback"].get(key)
+        if match is not None:
+            return {**match, "type": canonical, "payload": payload}
+        if not canonical:
+            return {
+                "label": stored_label or payload or "未识别规则",
+                "source": "legacy",
+                "sourceId": "",
+                "sourceLabel": "历史记录",
+                "detail": "",
+                "type": "",
+                "payload": payload,
+            }
+        type_label = RULE_TYPE_LABELS.get(canonical, canonical)
+        if canonical == "RULE-SET":
+            label = "未识别规则集"
+        elif canonical == "MATCH":
+            label = "最终匹配"
+        else:
+            label = f"{type_label} · {payload}" if payload else type_label
+        detail = ",".join(part for part in (canonical, payload) if part)
+        return {
+            "label": label,
+            "source": "unmanaged",
+            "sourceId": "",
+            "sourceLabel": "未纳管规则",
+            "detail": detail,
+            "type": canonical,
+            "payload": payload,
+        }
 
     def summary(self) -> dict[str, Any]:
         workspace = self._load()
@@ -1581,6 +1619,157 @@ class RuleWorkspace:
 rule_workspace = RuleWorkspace()
 
 
+async def _handle_traffic_anomaly(
+    action_id: int,
+    connection: dict[str, Any],
+    anomaly_settings: dict[str, Any],
+) -> None:
+    """Classify and, when explicitly enabled, execute one constrained response."""
+    traffic = int(connection.get("upload") or 0) + int(connection.get("download") or 0)
+    decision = str(anomaly_settings.get("actionPolicy") or "ai")
+    reason = "达到管理员设置的单连接流量阈值"
+    try:
+        if decision == "ai":
+            result = await traffic_anomaly_ai.decide(connection)
+            decision = result["decision"]
+            reason = result["reason"]
+    except Exception as exc:
+        logger.warning("traffic anomaly AI decision failed", exc_info=True)
+        decision = "alert"
+        reason = f"AI 分析失败，已降级为仅提醒：{type(exc).__name__}"
+
+    host = str(connection.get("host") or "")
+    destination_ip = str(connection.get("destinationIP") or "")
+    target = host or destination_ip or "未知目标"
+    title = "检测到高流量连接"
+    detail = {
+        "actionId": action_id,
+        "connectionId": connection.get("id"),
+        "device": connection.get("device"),
+        "sourceIP": connection.get("sourceIP"),
+        "target": target,
+        "trafficBytes": traffic,
+        "decision": decision,
+        "reason": reason,
+        "policy": connection.get("policy"),
+        "node": connection.get("node"),
+    }
+    autonomous = bool(anomaly_settings.get("autonomous"))
+    if not autonomous or decision == "alert":
+        await asyncio.to_thread(
+            traffic_anomalies.complete,
+            action_id,
+            decision=decision,
+            reason=reason,
+            status="alerted",
+        )
+        await asyncio.to_thread(
+            _record_gateway_event,
+            "warning",
+            "traffic-anomaly",
+            title,
+            f"{connection.get('device')} 访问 {target} 已使用 {_human_bytes(traffic)}；建议：{_anomaly_decision_label(decision)}。",
+            detail,
+            f"traffic-anomaly:{action_id}",
+        )
+        return
+
+    cooldown_since = int(time.time()) - int(anomaly_settings.get("cooldownSeconds") or 3600)
+    if await asyncio.to_thread(traffic_anomalies.recent_target_action, host, destination_ip, cooldown_since):
+        await asyncio.to_thread(
+            traffic_anomalies.complete,
+            action_id,
+            decision=decision,
+            reason=f"{reason}；同一目标仍在冷却期，未重复写规则",
+            status="skipped",
+        )
+        return
+
+    rule_content = ""
+    try:
+        rule_content = target_rule(connection, decision)
+        summary = await asyncio.to_thread(rule_workspace.summary)
+        existing = next(
+            (
+                item for item in summary.get("customRules") or []
+                if str(item.get("content") or "").casefold() == rule_content.casefold() and item.get("enabled", True)
+            ),
+            None,
+        )
+        if existing is None:
+            await asyncio.to_thread(
+                rule_workspace.add_custom_rule,
+                rule_content,
+                "before",
+                f"异常守卫：{connection.get('device')} · {target}",
+            )
+            await rule_workspace.apply()
+        connection_id = str(connection.get("id") or "")
+        if connection_id:
+            await mihomo.delete(f"/connections/{quote(connection_id, safe='')}")
+        await asyncio.to_thread(
+            traffic_anomalies.complete,
+            action_id,
+            decision=decision,
+            reason=reason,
+            status="executed",
+            rule_content=rule_content,
+        )
+        await asyncio.to_thread(
+            _record_gateway_event,
+            "warning",
+            "traffic-anomaly",
+            "高流量连接已自动处置",
+            f"已终止 {connection.get('device')} 到 {target} 的连接，并写入规则：{rule_content}",
+            {**detail, "rule": rule_content, "executed": True},
+            f"traffic-anomaly:{action_id}",
+        )
+        await asyncio.to_thread(
+            _record_audit,
+            None,
+            "auto_mitigate",
+            "traffic_anomaly",
+            str(action_id),
+            "ok",
+            {**detail, "rule": rule_content},
+        )
+    except Exception as exc:
+        logger.exception("traffic anomaly automatic mitigation failed")
+        await asyncio.to_thread(
+            traffic_anomalies.complete,
+            action_id,
+            decision=decision if decision in {"block", "direct", "alert"} else "alert",
+            reason=reason,
+            status="failed",
+            rule_content=rule_content,
+            error=str(exc),
+        )
+        await asyncio.to_thread(
+            _record_gateway_event,
+            "error",
+            "traffic-anomaly",
+            "异常连接自动处置失败",
+            f"{connection.get('device')} 到 {target} 的连接已触发告警，但规则或连接操作失败。",
+            {**detail, "error": type(exc).__name__},
+            f"traffic-anomaly:{action_id}",
+        )
+
+
+def _human_bytes(value: int) -> str:
+    amount = float(max(0, value))
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    unit = units[0]
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            break
+        amount /= 1024
+    return f"{amount:.1f} {unit}"
+
+
+def _anomaly_decision_label(decision: str) -> str:
+    return {"block": "阻断目标", "direct": "改走直连", "alert": "仅提醒"}.get(decision, "仅提醒")
+
+
 def _clean_name(name: str) -> str:
     cleaned = re.sub(r"^[^A-Za-z0-9\u3400-\u9fff\[]+", "", name or "").strip()
     return cleaned or name
@@ -1690,6 +1879,7 @@ class TrafficCollector:
         self._pending_interval = 0.0
         self._detail_pending: dict[tuple[str, str, str, str], dict[str, int]] = {}
         self._flow_pending: dict[tuple[str, str, str], dict[str, int]] = {}
+        self._anomaly_tasks: set[asyncio.Task[Any]] = set()
 
     def initialize(self) -> None:
         """Restore rate cursors and a useful chart window before polling resumes."""
@@ -1760,6 +1950,11 @@ class TrafficCollector:
         session_rows: list[tuple[Any, ...]] = []
         device_rollup: dict[str, dict[str, Any]] = defaultdict(lambda: {"active": 0, "up": 0, "down": 0, "total": 0})
         chain_rollup: dict[str, int] = defaultdict(int)
+        try:
+            rule_catalog = rule_workspace.match_catalog()
+        except Exception:
+            logger.exception("rule match catalog unavailable")
+            rule_catalog = {"providers": {}, "custom": {}, "fallback": {}}
 
         for connection in raw_connections:
             connection_id = str(connection.get("id", ""))
@@ -1789,7 +1984,10 @@ class TrafficCollector:
             detail["down"] += connection_down_delta
             if not previous:
                 detail["connections"] += 1
-            rule_name = _clean_name(str(connection.get("rulePayload") or connection.get("rule") or "Match"))
+            raw_rule_type = str(connection.get("rule") or "")
+            raw_rule_payload = str(connection.get("rulePayload") or "")
+            rule_match = rule_workspace.resolve_match(raw_rule_type, raw_rule_payload, rule_catalog)
+            rule_name = rule_match["label"]
             flow_key = (source_ip, rule_name, json.dumps(display_chain, ensure_ascii=False, separators=(",", ":")))
             flow_detail = self._flow_pending.setdefault(flow_key, {"up": 0, "down": 0})
             flow_detail["up"] += connection_up_delta
@@ -1805,6 +2003,12 @@ class TrafficCollector:
                 "destinationPort": metadata.get("destinationPort") or "",
                 "network": metadata.get("network") or "tcp",
                 "rule": rule_name,
+                "ruleType": rule_match["type"],
+                "rulePayload": rule_match["payload"],
+                "ruleSource": rule_match["source"],
+                "ruleSourceId": rule_match["sourceId"],
+                "ruleSourceLabel": rule_match["sourceLabel"],
+                "ruleDetail": rule_match["detail"],
                 "chain": display_chain,
                 "upRate": round(up_rate),
                 "downRate": round(down_rate),
@@ -1812,6 +2016,10 @@ class TrafficCollector:
                 "download": download,
                 "duration": _duration(connection.get("start")),
             }
+            row["service"] = service
+            row["route"] = exit_mode
+            row["policy"] = "DIRECT" if exit_mode == "direct" else (display_chain[-2] if len(display_chain) > 1 else display_chain[-1])
+            row["node"] = "DIRECT" if exit_mode == "direct" else display_chain[-1]
             transformed.append(row)
             session_rows.append(
                 (
@@ -1827,6 +2035,11 @@ class TrafficCollector:
                     wall_time,
                     upload,
                     download,
+                    rule_match["type"],
+                    rule_match["payload"],
+                    rule_match["source"],
+                    rule_match["sourceId"],
+                    rule_match["label"],
                 )
             )
             device = device_rollup[source_ip]
@@ -1898,6 +2111,21 @@ class TrafficCollector:
             self._pending_interval = 0.0
             self._detail_pending = {}
             self._flow_pending = {}
+
+        anomaly_settings = await asyncio.to_thread(traffic_anomalies.get_settings)
+        if anomaly_settings["enabled"]:
+            threshold = int(anomaly_settings["thresholdBytes"])
+            for row in transformed:
+                if row["route"] != "proxy" or int(row["upload"]) + int(row["download"]) < threshold:
+                    continue
+                if is_protected_target(row["host"], row["destinationIP"], anomaly_settings["protectedTargets"]):
+                    continue
+                action_id = await asyncio.to_thread(traffic_anomalies.reserve, row, threshold)
+                if action_id is None:
+                    continue
+                task = asyncio.create_task(_handle_traffic_anomaly(action_id, dict(row), anomaly_settings))
+                self._anomaly_tasks.add(task)
+                task.add_done_callback(self._anomaly_tasks.discard)
 
     def _persist(
         self,
@@ -2015,8 +2243,9 @@ class TrafficCollector:
                 """
                 INSERT INTO connection_sessions(
                     id,device,host,destination_ip,destination_port,network,rule,chain,
-                    started_at,last_seen_at,upload_bytes,download_bytes
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    started_at,last_seen_at,upload_bytes,download_bytes,
+                    rule_type,rule_payload,rule_source,rule_source_id,rule_label
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     device=excluded.device,
                     host=excluded.host,
@@ -2028,7 +2257,12 @@ class TrafficCollector:
                     last_seen_at=excluded.last_seen_at,
                     ended_at=NULL,
                     upload_bytes=excluded.upload_bytes,
-                    download_bytes=excluded.download_bytes
+                    download_bytes=excluded.download_bytes,
+                    rule_type=excluded.rule_type,
+                    rule_payload=excluded.rule_payload,
+                    rule_source=excluded.rule_source,
+                    rule_source_id=excluded.rule_source_id,
+                    rule_label=excluded.rule_label
                 """,
                 session_rows,
             )
@@ -2518,84 +2752,6 @@ def _usage_flow(device_name: str, rows: list[Any]) -> dict[str, Any]:
     return {"nodes": nodes, "links": [{"source": source, "target": target, "value": value} for (source, target), value in links.items()], "empty": not rows}
 
 
-class LoginRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=80)
-    password: str = Field(min_length=1, max_length=512)
-
-
-class StrategySelectRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=300)
-    reconnect: bool = True
-
-
-class DeviceAliasesRequest(BaseModel):
-    aliases: dict[str, str] = Field(default_factory=dict)
-
-
-class CreateUserRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=64)
-    password: str = Field(min_length=12, max_length=512)
-    role: str = "viewer"
-    allowedDevices: list[str] = Field(default_factory=list, max_length=256)
-
-
-class UpdateUserRequest(BaseModel):
-    password: str | None = Field(default=None, min_length=12, max_length=512)
-    role: str | None = None
-    allowedDevices: list[str] | None = Field(default=None, max_length=256)
-
-
-class SubscriptionRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    url: str = Field(min_length=8, max_length=4096)
-    interval: int = Field(default=21600, ge=900, le=2_592_000)
-    enabled: bool = True
-
-
-class SubscriptionUpdateRequest(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
-    url: str | None = Field(default=None, min_length=8, max_length=4096)
-    interval: int | None = Field(default=None, ge=900, le=2_592_000)
-    enabled: bool | None = None
-
-
-class RuleSetRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    url: str = Field(min_length=8, max_length=2048)
-    policy: str = Field(min_length=1, max_length=300)
-    enabled: bool = True
-    interval: int = Field(default=86400, ge=300, le=2_592_000)
-    behavior: str = Field(default="classical", pattern="^(classical|domain|ipcidr)$")
-    format: str = Field(default="text", pattern="^(text|yaml|mrs)$")
-
-
-class RuleSetUpdateRequest(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=120)
-    url: str | None = Field(default=None, min_length=8, max_length=2048)
-    policy: str | None = Field(default=None, min_length=1, max_length=300)
-    enabled: bool | None = None
-    interval: int | None = Field(default=None, ge=300, le=2_592_000)
-    behavior: str | None = Field(default=None, pattern="^(classical|domain|ipcidr)$")
-    format: str | None = Field(default=None, pattern="^(text|yaml|mrs)$")
-
-
-class RuleMoveRequest(BaseModel):
-    direction: str = Field(pattern="^(up|down)$")
-
-
-class CustomRuleRequest(BaseModel):
-    content: str = Field(min_length=3, max_length=4096)
-    placement: str = Field(default="before", pattern="^(before|after)$")
-    note: str = Field(default="", max_length=300)
-
-
-class CustomRuleUpdateRequest(BaseModel):
-    content: str | None = Field(default=None, min_length=3, max_length=4096)
-    placement: str | None = Field(default=None, pattern="^(before|after)$")
-    note: str | None = Field(default=None, max_length=300)
-    enabled: bool | None = None
-
-
 def current_user(
     egresscope_session: str | None = Cookie(default=None),
     ssslab_session: str | None = Cookie(default=None),
@@ -2789,9 +2945,97 @@ async def update_user(user_id: int, request: UpdateUserRequest, admin: dict[str,
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.get("/api/ai/settings")
+async def get_ai_settings(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    del admin
+    return {"settings": await asyncio.to_thread(ai_settings.get)}
+
+
+@app.put("/api/ai/settings")
+async def update_ai_settings(
+    request: AISettingsRequest,
+    admin: dict[str, Any] = Depends(admin_user),
+) -> dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(
+            ai_settings.update,
+            request.provider,
+            request.model,
+            request.apiKey,
+            request.clearApiKey,
+        )
+        await asyncio.to_thread(
+            _record_audit,
+            admin["id"],
+            "update",
+            "ai_settings",
+            request.provider,
+            "ok",
+            {"provider": request.provider, "model": request.model, "apiKeyChanged": request.apiKey is not None or request.clearApiKey},
+        )
+        return {"settings": result}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/traffic-anomalies")
+async def traffic_anomaly_status(
+    limit: int = Query(default=50, ge=1, le=200),
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    result = await asyncio.to_thread(traffic_anomalies.list_actions, allowed_devices=allowed, limit=limit)
+    settings_payload = await asyncio.to_thread(traffic_anomalies.get_settings)
+    if user.get("role") != "admin":
+        settings_payload = {key: value for key, value in settings_payload.items() if key != "protectedTargets"}
+    ai = await asyncio.to_thread(ai_settings.get)
+    result["settings"] = settings_payload
+    result["ai"] = {
+        "configured": ai["apiKeyConfigured"],
+        "providerLabel": ai["providerLabel"],
+        "model": ai["model"],
+    }
+    result["canManage"] = user.get("role") == "admin"
+    return result
+
+
+@app.put("/api/traffic-anomalies/settings")
+async def update_traffic_anomaly_settings(
+    request: TrafficAnomalySettingsRequest,
+    admin: dict[str, Any] = Depends(admin_user),
+) -> dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(traffic_anomalies.update_settings, request.model_dump())
+        await asyncio.to_thread(
+            _record_audit,
+            admin["id"],
+            "update",
+            "traffic_anomaly_settings",
+            "1",
+            "ok",
+            {
+                "enabled": payload["enabled"],
+                "autonomous": payload["autonomous"],
+                "thresholdBytes": payload["thresholdBytes"],
+                "actionPolicy": payload["actionPolicy"],
+            },
+        )
+        return {"settings": payload}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/subscriptions")
 async def subscription_list(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    return await asyncio.to_thread(subscriptions.list, user)
+    result = await asyncio.to_thread(subscriptions.list, user)
+    ai = await asyncio.to_thread(ai_settings.get)
+    result["ai"] = {
+        "provider": ai["provider"],
+        "providerLabel": ai["providerLabel"],
+        "model": ai["model"],
+        "configured": ai["apiKeyConfigured"],
+    }
+    return result
 
 
 @app.post("/api/subscriptions", status_code=201)
@@ -2852,6 +3096,114 @@ async def refresh_subscription(subscription_id: str, user: dict[str, Any] = Depe
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="订阅源暂时无法访问") from exc
+
+
+@app.get("/api/subscriptions/{subscription_id}/filter")
+async def get_subscription_filter(
+    subscription_id: str,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(subscriptions.filter_workspace, subscription_id, user)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/subscriptions/{subscription_id}/filter/preview")
+async def preview_subscription_filter(
+    subscription_id: str,
+    request: SubscriptionFilterRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(
+            subscriptions.preview_filter,
+            subscription_id,
+            user,
+            request.model_dump(exclude={"source"}),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/subscriptions/{subscription_id}/filter")
+async def update_subscription_filter(
+    subscription_id: str,
+    request: SubscriptionFilterRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    try:
+        previous = await asyncio.to_thread(subscriptions.filter_workspace, subscription_id, user)
+        filter_config = request.model_dump(exclude={"source"})
+        item = await asyncio.to_thread(
+            subscriptions.update_filter,
+            subscription_id,
+            user,
+            filter_config,
+            request.source,
+        )
+        if item["gatewayEnabled"]:
+            try:
+                await rule_workspace.apply()
+            except Exception:
+                await asyncio.to_thread(
+                    subscriptions.update_filter,
+                    subscription_id,
+                    user,
+                    previous["filter"],
+                    previous["subscription"]["filterSource"],
+                )
+                raise
+        await asyncio.to_thread(
+            _record_audit,
+            user["id"],
+            "update",
+            "subscription_filter",
+            subscription_id,
+            "ok",
+            {"source": request.source, "kept": item["filterPreview"]["kept"], "excluded": item["filterPreview"]["excluded"]},
+        )
+        return {"subscription": item}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="过滤规则已回滚，因为 mihomo 拒绝了新节点配置") from exc
+
+
+@app.post("/api/subscriptions/{subscription_id}/analyze-filter")
+async def analyze_subscription_filter(
+    subscription_id: str,
+    request: SubscriptionAIAnalyzeRequest,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(_claim_ai_analysis, int(user["id"]))
+        _, nodes, current_filter = await asyncio.to_thread(subscriptions.ai_inventory, subscription_id, user)
+        async with AI_ANALYSIS_SEMAPHORE:
+            analysis = await subscription_ai.analyze(nodes, current_filter, request.instruction)
+        await asyncio.to_thread(subscriptions.save_ai_analysis, subscription_id, analysis)
+        await asyncio.to_thread(
+            _record_audit,
+            user["id"],
+            "analyze",
+            "subscription_filter",
+            subscription_id,
+            "ok",
+            {"provider": analysis["provider"], "model": analysis["model"], "nodeCount": len(nodes)},
+        )
+        return {"analysis": analysis}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="订阅不存在或无权访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="AI 提供商暂时无法访问") from exc
 
 
 @app.post("/api/subscriptions/{subscription_id}/rotate-token")
@@ -2996,7 +3348,8 @@ def _connection_statistics(
         rows = connection.execute(
             f"""
             SELECT id,device,host,destination_ip,destination_port,network,rule,chain,
-                   started_at,last_seen_at,ended_at,upload_bytes,download_bytes,termination_reason
+                   started_at,last_seen_at,ended_at,upload_bytes,download_bytes,termination_reason,
+                   rule_type,rule_payload,rule_source,rule_source_id,rule_label
             FROM connection_sessions
             WHERE {scope_where} AND {status_condition}
             ORDER BY CASE WHEN ended_at IS NULL THEN 0 ELSE 1 END, last_seen_at DESC
@@ -3006,6 +3359,12 @@ def _connection_statistics(
         ).fetchall()
     live = {row["id"]: row for row in collector.visible_connections(user)}
     sessions = []
+    rule_catalog = {"providers": {}, "custom": {}, "fallback": {}}
+    if any(row["rule_type"] or row["rule_payload"] for row in rows):
+        try:
+            rule_catalog = rule_workspace.match_catalog()
+        except Exception:
+            logger.exception("rule match catalog unavailable while reading connection history")
     for row in rows:
         source_ip = str(row["device"])
         active_row = live.get(str(row["id"]))
@@ -3017,6 +3376,12 @@ def _connection_statistics(
         started_at = int(row["started_at"] or row["last_seen_at"] or now)
         ended_at = int(row["ended_at"]) if row["ended_at"] is not None else None
         duration_seconds = max(0, (ended_at or now) - started_at)
+        rule_match = rule_workspace.resolve_match(
+            str(row["rule_type"] or ""),
+            str(row["rule_payload"] or ""),
+            rule_catalog,
+            str(row["rule_label"] or row["rule"] or ""),
+        )
         sessions.append(
             {
                 "id": str(row["id"]),
@@ -3026,7 +3391,13 @@ def _connection_statistics(
                 "destinationIP": str(row["destination_ip"] or ""),
                 "destinationPort": str(row["destination_port"] or ""),
                 "network": str(row["network"] or "tcp"),
-                "rule": str(row["rule"] or "Match"),
+                "rule": rule_match["label"],
+                "ruleType": rule_match["type"],
+                "rulePayload": rule_match["payload"],
+                "ruleSource": rule_match["source"],
+                "ruleSourceId": rule_match["sourceId"],
+                "ruleSourceLabel": rule_match["sourceLabel"],
+                "ruleDetail": rule_match["detail"],
                 "chain": chain or ["DIRECT"],
                 "startedAt": started_at,
                 "lastSeenAt": int(row["last_seen_at"] or started_at),
@@ -3056,6 +3427,154 @@ def _connection_statistics(
     }
 
 
+def _traffic_ledger(
+    user: dict[str, Any],
+    range_key: str,
+    route: str,
+    order: str,
+    device: str,
+    query: str,
+    limit: int,
+    offset: int,
+) -> dict[str, Any]:
+    """Return connection-level traffic evidence without separating target and exit dimensions."""
+    now = int(time.time())
+    start = _calendar_start("month", now) if range_key == "month" else now - TRAFFIC_LEDGER_RANGES[range_key]
+    allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    conditions = ["last_seen_at >= ?"]
+    parameters: list[Any] = [start]
+    if route == "proxy":
+        conditions.append("instr(chain, 'DIRECT') = 0")
+    elif route == "direct":
+        conditions.append("instr(chain, 'DIRECT') > 0")
+    if INFRASTRUCTURE_SOURCE_IPS:
+        placeholders = ",".join("?" for _ in INFRASTRUCTURE_SOURCE_IPS)
+        conditions.append(f"device NOT IN ({placeholders})")
+        parameters.extend(sorted(INFRASTRUCTURE_SOURCE_IPS))
+    if device:
+        if allowed is not None and device not in allowed:
+            return {"range": range_key, "route": route, "summary": {"events": 0, "traffic": 0, "devices": 0}, "events": []}
+        conditions.append("device = ?")
+        parameters.append(device)
+    elif allowed is not None:
+        if not allowed:
+            conditions.append("1 = 0")
+        else:
+            placeholders = ",".join("?" for _ in allowed)
+            conditions.append(f"device IN ({placeholders})")
+            parameters.extend(sorted(allowed))
+    if query:
+        pattern = f"%{query.casefold()}%"
+        conditions.append(
+            "(lower(host) LIKE ? OR lower(destination_ip) LIKE ? OR lower(device) LIKE ? "
+            "OR lower(rule) LIKE ? OR lower(chain) LIKE ?)"
+        )
+        parameters.extend([pattern] * 5)
+    where = " AND ".join(conditions)
+    ordering = "upload_bytes + download_bytes DESC, last_seen_at DESC" if order == "traffic" else "last_seen_at DESC, upload_bytes + download_bytes DESC"
+    with _db() as connection:
+        summary = connection.execute(
+            f"""
+            SELECT COUNT(*) events, COUNT(DISTINCT device) devices,
+                   COALESCE(SUM(upload_bytes), 0) upload,
+                   COALESCE(SUM(download_bytes), 0) download
+            FROM connection_sessions WHERE {where}
+            """,
+            parameters,
+        ).fetchone()
+        rows = connection.execute(
+            f"""
+            SELECT id,device,host,destination_ip,destination_port,network,rule,chain,
+                   started_at,last_seen_at,ended_at,upload_bytes,download_bytes,
+                   rule_type,rule_payload,rule_source,rule_source_id,rule_label
+            FROM connection_sessions WHERE {where}
+            ORDER BY {ordering} LIMIT ? OFFSET ?
+            """,
+            [*parameters, limit, offset],
+        ).fetchall()
+    aliases = _aliases()
+    try:
+        group_names = set(rule_workspace.summary().get("availablePolicies") or [])
+    except Exception:
+        logger.exception("strategy catalog unavailable while reading traffic ledger")
+        group_names = set()
+    try:
+        rule_catalog = rule_workspace.match_catalog()
+    except Exception:
+        logger.exception("rule match catalog unavailable while reading traffic ledger")
+        rule_catalog = {"providers": {}, "custom": {}, "fallback": {}}
+    events = []
+    for row in rows:
+        try:
+            chain = [str(item) for item in json.loads(str(row["chain"] or "[]"))]
+        except (json.JSONDecodeError, TypeError):
+            chain = [str(row["chain"] or "")]
+        chain = [item for item in chain if item] or ["DIRECT"]
+        direct = "DIRECT" in chain
+        policies = [item for item in chain if item in group_names]
+        policy = policies[-1] if policies else ("DIRECT" if direct else (chain[-2] if len(chain) > 1 else chain[-1]))
+        node = "DIRECT" if direct else (chain[-1] if chain[-1] != policy else "")
+        started_at = int(row["started_at"] or row["last_seen_at"] or now)
+        ended_at = int(row["ended_at"]) if row["ended_at"] is not None else None
+        target_host = str(row["host"] or "")
+        destination_ip = str(row["destination_ip"] or "")
+        service, _ = _service_for(target_host, destination_ip)
+        rule_match = rule_workspace.resolve_match(
+            str(row["rule_type"] or ""),
+            str(row["rule_payload"] or ""),
+            rule_catalog,
+            str(row["rule_label"] or row["rule"] or ""),
+        )
+        events.append(
+            {
+                "id": str(row["id"]),
+                "status": "active" if ended_at is None else "ended",
+                "device": aliases.get(str(row["device"]), str(row["device"])),
+                "sourceIP": str(row["device"]),
+                "service": service,
+                "host": target_host,
+                "destinationIP": destination_ip,
+                "destinationPort": str(row["destination_port"] or ""),
+                "network": str(row["network"] or "tcp"),
+                "route": "direct" if direct else "proxy",
+                "rule": rule_match["label"],
+                "ruleType": rule_match["type"],
+                "rulePayload": rule_match["payload"],
+                "ruleSource": rule_match["source"],
+                "ruleSourceId": rule_match["sourceId"],
+                "ruleSourceLabel": rule_match["sourceLabel"],
+                "ruleDetail": rule_match["detail"],
+                "chain": chain,
+                "policy": policy,
+                "node": node,
+                "startedAt": started_at,
+                "lastSeenAt": int(row["last_seen_at"] or started_at),
+                "endedAt": ended_at,
+                "durationSeconds": max(0, (ended_at or now) - started_at),
+                "upload": int(row["upload_bytes"] or 0),
+                "download": int(row["download_bytes"] or 0),
+                "traffic": int(row["upload_bytes"] or 0) + int(row["download_bytes"] or 0),
+            }
+        )
+    upload = int(summary["upload"] or 0)
+    download = int(summary["download"] or 0)
+    return {
+        "range": range_key,
+        "route": route,
+        "order": order,
+        "retentionDays": settings.retention_days,
+        "precision": {"unit": "connection", "target": "host-or-ip", "urlPathAvailable": False},
+        "summary": {
+            "events": int(summary["events"] or 0),
+            "devices": int(summary["devices"] or 0),
+            "upload": upload,
+            "download": download,
+            "traffic": upload + download,
+        },
+        "events": events,
+    }
+
+
 @app.get("/api/connection-statistics")
 async def connection_statistics(
     range: str = Query(default="24h", pattern="^(1h|6h|24h|7d|30d)$"),
@@ -3065,6 +3584,22 @@ async def connection_statistics(
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     return await asyncio.to_thread(_connection_statistics, user, range, status, limit, offset)
+
+
+@app.get("/api/traffic-ledger")
+async def traffic_ledger(
+    range: str = Query(default="24h", pattern="^(live|1h|6h|24h|7d|14d|month)$"),
+    route: str = Query(default="proxy", pattern="^(proxy|direct|all)$"),
+    order: str = Query(default="traffic", pattern="^(traffic|recent)$"),
+    device: str = Query(default="", max_length=80),
+    query: str = Query(default="", max_length=120),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _traffic_ledger, user, range, route, order, device.strip(), query.strip(), limit, offset
+    )
 
 
 @app.delete("/api/connections")
