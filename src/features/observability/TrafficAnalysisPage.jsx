@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AppleLogo,
   ArrowRight,
+  CaretDown,
+  CaretUp,
   ClockCounterClockwise,
   Desktop,
   GithubLogo,
@@ -69,6 +71,7 @@ const DEMO_USAGE_HISTORY = {
 
 const DEMO_LEDGER_EVENTS = [
   { id:"ledger-1",status:"ended",device:"U55C",sourceIP:"192.168.31.42",service:"Hugging Face",host:"cdn-lfs.huggingface.co",destinationIP:"13.33.88.71",destinationPort:"443",network:"tcp",route:"proxy",rule:"AI 模型下载",ruleType:"RULE-SET",rulePayload:"ssslab-ai-models",ruleSource:"rule-set",ruleSourceLabel:"规则集",chain:["节点选择","美国","美国最佳","🇺🇸 电信 美国洛杉矶 04"],policy:"美国最佳",node:"🇺🇸 电信 美国洛杉矶 04",startedAt:1786591200,endedAt:1786593120,durationSeconds:1920,upload:42000000,download:2.6*1024**3,traffic:2.6*1024**3+42000000 },
+  { id:"ledger-1b",status:"ended",device:"U55C",sourceIP:"192.168.31.42",service:"Hugging Face",host:"cdn-lfs.huggingface.co",destinationIP:"13.33.88.72",destinationPort:"443",network:"tcp",route:"proxy",rule:"AI 模型下载",ruleType:"RULE-SET",rulePayload:"ssslab-ai-models",ruleSource:"rule-set",ruleSourceLabel:"规则集",chain:["节点选择","美国","美国最佳","🇺🇸 联通 美国西雅图 07"],policy:"美国最佳",node:"🇺🇸 联通 美国西雅图 07",startedAt:1786587200,endedAt:1786588100,durationSeconds:900,upload:12000000,download:.7*1024**3,traffic:.7*1024**3+12000000 },
   { id:"ledger-2",status:"ended",device:"ssslab-login-1",sourceIP:"192.168.31.225",service:"Matrix",host:"matrix-client.matrix.org",destinationIP:"104.22.5.18",destinationPort:"443",network:"tcp",route:"proxy",rule:"最终兜底",ruleType:"MATCH",rulePayload:"",ruleSource:"fallback",ruleSourceLabel:"安全兜底",chain:["节点选择","香港","香港智能","🇭🇰 香港 03"],policy:"香港智能",node:"🇭🇰 香港 03",startedAt:1786586100,endedAt:1786590300,durationSeconds:4200,upload:80000000,download:.9*1024**3,traffic:.9*1024**3+80000000 },
   { id:"ledger-3",status:"active",device:"192.168.31.177",sourceIP:"192.168.31.177",service:"Microsoft",host:"download.visualstudio.microsoft.com",destinationIP:"23.44.18.91",destinationPort:"443",network:"tcp",route:"proxy",rule:"Microsoft",ruleType:"RULE-SET",rulePayload:"ssslab-microsoft",ruleSource:"rule-set",ruleSourceLabel:"规则集",chain:["节点选择","美国","美国智能","🇺🇸 联通 美国西雅图 07"],policy:"美国智能",node:"🇺🇸 联通 美国西雅图 07",startedAt:1786593300,endedAt:null,durationSeconds:940,upload:18000000,download:.45*1024**3,traffic:.45*1024**3+18000000 },
   { id:"ledger-direct",status:"ended",device:"U55C",sourceIP:"192.168.31.42",service:"Ssslab",host:"a100.ssslab.cn",destinationIP:"10.18.18.244",destinationPort:"22",network:"tcp",route:"direct",rule:"实验室内网",ruleType:"IP-CIDR",rulePayload:"10.0.0.0/8",ruleSource:"custom",ruleSourceLabel:"自定义规则",chain:["全球直连","DIRECT"],policy:"DIRECT",node:"DIRECT",startedAt:1786592200,endedAt:1786592500,durationSeconds:300,upload:65000000,download:220000000,traffic:285000000 },
@@ -85,11 +88,27 @@ const DEMO_ANOMALIES = {
   ],
 };
 
+const groupDemoLedgerEvents = events => [...events.reduce((groups,event)=>{
+  const target=(event.host||event.destinationIP||"").toLowerCase();
+  const key=`${event.sourceIP}|${event.route}|${target}`;
+  const current=groups.get(key);
+  if (!current) groups.set(key,{...event,id:key,grouped:true,latestConnectionId:event.id,connectionCount:1,activeConnections:event.status==="active"?1:0,ruleVariants:1,pathVariants:1,firstSeenAt:event.startedAt,lastSeenAt:event.endedAt||event.startedAt,spanSeconds:event.durationSeconds,members:[event],rules:new Set([event.rule]),paths:new Set([event.chain.join(" → ")])});
+  else {
+    current.members.push(event); current.connectionCount+=1; current.activeConnections+=event.status==="active"?1:0;
+    current.upload+=event.upload;current.download+=event.download;current.traffic+=event.traffic;current.durationSeconds+=event.durationSeconds;
+    current.firstSeenAt=Math.min(current.firstSeenAt,event.startedAt);current.lastSeenAt=Math.max(current.lastSeenAt,event.endedAt||event.startedAt);current.spanSeconds=current.lastSeenAt-current.firstSeenAt;
+    current.rules.add(event.rule);current.paths.add(event.chain.join(" → "));current.ruleVariants=current.rules.size;current.pathVariants=current.paths.size;
+    if ((event.endedAt||event.startedAt)>=(current.endedAt||current.startedAt)) Object.assign(current,{latestConnectionId:event.id,status:event.status,service:event.service,host:event.host,destinationIP:event.destinationIP,destinationPort:event.destinationPort,network:event.network,rule:event.rule,ruleType:event.ruleType,rulePayload:event.rulePayload,ruleSource:event.ruleSource,ruleSourceLabel:event.ruleSourceLabel,chain:event.chain,policy:event.policy,node:event.node,endedAt:event.endedAt});
+  }
+  return groups;
+},new Map()).values()].map(({rules,paths,...event})=>event);
+
 const demoLedger = (route = "proxy") => {
-  const events = DEMO_LEDGER_EVENTS.filter(item => route === "all" || item.route === route);
-  const upload = events.reduce((sum,item)=>sum+item.upload,0);
-  const download = events.reduce((sum,item)=>sum+item.download,0);
-  return { retentionDays:30, precision:{ unit:"connection",target:"host-or-ip",urlPathAvailable:false }, summary:{ events:events.length,devices:new Set(events.map(item=>item.sourceIP)).size,upload,download,traffic:upload+download }, events };
+  const rawEvents = DEMO_LEDGER_EVENTS.filter(item => route === "all" || item.route === route);
+  const events = groupDemoLedgerEvents(rawEvents);
+  const upload = rawEvents.reduce((sum,item)=>sum+item.upload,0);
+  const download = rawEvents.reduce((sum,item)=>sum+item.download,0);
+  return { retentionDays:30, precision:{ unit:"device-target",target:"host-or-ip",urlPathAvailable:false }, summary:{ events:rawEvents.length,groups:events.length,devices:new Set(rawEvents.map(item=>item.sourceIP)).size,upload,download,traffic:upload+download }, events };
 };
 
 const SERVICE_VISUALS = {
@@ -118,23 +137,38 @@ function UsageTooltip({ active, payload, label }) {
   return <div className="chart-tooltip"><strong>{label}</strong>{payload.filter(item => item.value).map(item => <span key={item.dataKey} style={{ color: item.color }}>{item.name} {bytes(item.value)}</span>)}</div>;
 }
 
-function TrafficLedger({ ledger, route, setRoute, order, setOrder, query, setQuery, canManage, onAddRule }) {
+function TrafficLedger({ ledger, range, route, setRoute, order, setOrder, query, setQuery, canManage, onAddRule }) {
+  const [expanded, setExpanded] = useState("");
+  const [groupDetails, setGroupDetails] = useState({});
   const events = useMemo(() => (ledger.events || []).filter(event => `${event.device} ${event.sourceIP} ${event.host} ${event.destinationIP} ${event.rule} ${event.chain?.join(" ")}`.toLowerCase().includes(query.toLowerCase())), [ledger.events, query]);
+  const toggleDetails = async event => {
+    if (expanded===event.id) { setExpanded(""); return; }
+    setExpanded(event.id);
+    if (groupDetails[event.id]) return;
+    if (event.members) { setGroupDetails(current=>({...current,[event.id]:{events:event.members}})); return; }
+    setGroupDetails(current=>({...current,[event.id]:{loading:true,events:[]}}));
+    try {
+      const target=event.host||event.destinationIP;
+      const result=await api.trafficLedger({range,route:event.route,order:"recent",group:"connection",device:event.sourceIP,query:target,limit:500});
+      const members=(result.events||[]).filter(item=>(item.host||item.destinationIP||"").toLowerCase()===target.toLowerCase());
+      setGroupDetails(current=>({...current,[event.id]:{events:members}}));
+    } catch(error) { setGroupDetails(current=>({...current,[event.id]:{events:[],error:error.message}})); }
+  };
   return <section className="proxy-ledger panel">
     <div className="proxy-ledger-head">
-      <div><h3>代理花费追踪</h3><strong>{bytes(ledger.summary?.traffic || 0)}</strong><span>{ledger.summary?.events || 0} 个连接事件</span></div>
+      <div><h3>代理花费追踪</h3><strong>{bytes(ledger.summary?.traffic || 0)}</strong><span>{ledger.summary?.groups ?? events.length} 个设备-目标组合 · {ledger.summary?.events || 0} 次连接</span></div>
       <div className="ledger-controls"><div className="analysis-toggle"><button className={route==="proxy"?"active":""} onClick={()=>setRoute("proxy")}>代理出口</button><button className={route==="direct"?"active":""} onClick={()=>setRoute("direct")}>直连对照</button></div><div className="analysis-toggle"><button className={order==="traffic"?"active":""} onClick={()=>setOrder("traffic")}>流量优先</button><button className={order==="recent"?"active":""} onClick={()=>setOrder("recent")}>最近发生</button></div></div>
     </div>
     <div className="ledger-search"><MagnifyingGlass/><input value={query} onChange={event=>setQuery(event.target.value)} placeholder="搜索设备、目标、规则、策略或节点"/></div>
     <div className="ledger-table-wrap"><div className="ledger-table-head"><span>流量</span><span>时间 / 设备</span><span>访问目标</span><span>命中规则</span><span>策略与出口节点</span><span>调整</span></div>
-      <div className="ledger-event-list">{events.length ? events.map(event=><article className={`ledger-event route-${event.route}`} key={event.id}>
+      <div className="ledger-event-list">{events.length ? events.map(event=><div className={`ledger-group-block ${expanded===event.id?"is-expanded":""}`} key={event.id}><article className={`ledger-event route-${event.route}`}>
         <div className="ledger-traffic"><strong>{bytes(event.traffic)}</strong><span>↓ {bytes(event.download)} · ↑ {bytes(event.upload)}</span></div>
-        <div className="ledger-origin"><time>{connectionTime(event.startedAt)}</time><span><Desktop/>{event.device}</span><small>{event.status==="active"?"进行中":connectionDuration(event.durationSeconds)}</small></div>
+        <div className="ledger-origin"><time>{connectionTime(event.lastSeenAt || event.startedAt)}</time><span><Desktop/>{event.device}</span><small>{event.activeConnections?`${event.activeConnections} 个进行中 · 共 ${event.connectionCount} 次连接`:`${event.connectionCount} 次连接 · 跨度 ${connectionDuration(event.spanSeconds || event.durationSeconds)}`}</small></div>
         <div className="ledger-target"><strong>{event.host || event.destinationIP}</strong><span>{event.service} · {event.destinationIP}:{event.destinationPort}</span></div>
-        <div className="ledger-rule"><strong>{event.rule}</strong><span>{event.ruleSourceLabel || "规则"}</span></div>
-        <div className="ledger-exit"><span className={`route-badge ${event.route}`}>{event.route==="direct"?"DIRECT":"PROXY"}</span><strong>{event.policy || "未识别策略"}</strong>{event.route==="proxy"&&<><ArrowRight/><span title={event.node}>{event.node || "节点未知"}</span></>}</div>
-        <div className="ledger-action">{canManage?<button onClick={()=>onAddRule(event)}><Plus/>改规则</button>:<span>只读</span>}</div>
-      </article>) : <div className="ledger-empty">当前筛选条件下没有可追溯的流量事件</div>}</div>
+        <div className="ledger-rule"><strong>{event.rule}</strong><span>{event.ruleVariants>1?`共 ${event.ruleVariants} 种命中规则`:event.ruleSourceLabel || "规则"}</span></div>
+        <div className="ledger-exit"><span className={`route-badge ${event.route}`}>{event.route==="direct"?"DIRECT":"PROXY"}</span><strong>{event.policy || "未识别策略"}</strong>{event.route==="proxy"&&<><ArrowRight/><span title={event.node}>{event.node || "节点未知"}{event.pathVariants>1?` · 共 ${event.pathVariants} 条路径`:""}</span></>}</div>
+        <div className="ledger-action"><button className="ledger-detail-button" onClick={()=>toggleDetails(event)} title="查看原始连接">{expanded===event.id?<CaretUp/>:<CaretDown/>}<span>明细</span></button>{canManage?<button onClick={()=>onAddRule(event)}><Plus/><span>改规则</span></button>:null}</div>
+      </article>{expanded===event.id&&<div className="ledger-member-list">{groupDetails[event.id]?.loading?<div className="ledger-member-empty">正在加载连接明细</div>:groupDetails[event.id]?.error?<div className="ledger-member-empty">{groupDetails[event.id].error}</div>:(groupDetails[event.id]?.events||[]).length?<><div className="ledger-member-head"><span>发生时间</span><span>流量</span><span>命中规则</span><span>代理路径</span></div>{groupDetails[event.id].events.map(member=><div className="ledger-member" key={member.id}><time>{connectionTime(member.startedAt)}</time><strong>{bytes(member.traffic)}</strong><span>{member.rule}</span><span>{member.policy}{member.route==="proxy"&&member.node?` → ${member.node}`:""}</span></div>)}</>:<div className="ledger-member-empty">没有找到原始连接</div>}</div>}</div>) : <div className="ledger-empty">当前筛选条件下没有可追溯的流量事件</div>}</div>
     </div>
   </section>;
 }
@@ -209,7 +243,7 @@ export function AuditPage({ data, canManage = false }) {
   }, [rangeKey,device,ledgerRoute,ledgerOrder,ledgerQuery]);
   const openQuickRule = async (event) => {
     const host = event.host && !/^[\d.:]+$/.test(event.host) ? event.host : "";
-    const initial = { connection:event, matchType:host?"DOMAIN":"IP-CIDR", value:host||event.destinationIP, policy:"", policies:[], terminateCurrent:event.status === "active", busy:true, error:"" };
+    const initial = { connection:event, matchType:host?"DOMAIN":"IP-CIDR", value:host||event.destinationIP, policy:"", policies:[], terminateCurrent:event.status === "active"&&!event.grouped, busy:true, error:"" };
     if (DEMO_MODE) {
       const policies = ["节点选择", "美国最佳", "美国智能", "香港最佳", "香港智能", "DIRECT", "REJECT"];
       setQuickRule({ ...initial, policy:event.policy && policies.includes(event.policy) ? event.policy : "节点选择", policies, busy:false });
@@ -224,7 +258,7 @@ export function AuditPage({ data, canManage = false }) {
     try {
       await api.createCustomRule({content:editor.content,placement:"before",note:`来自流量追踪：${editor.connection.device}`});
       await api.applyRules();
-      if (editor.terminateCurrent && editor.connection.status === "active") {
+      if (editor.terminateCurrent && editor.connection.status === "active" && !editor.connection.grouped) {
         try { await api.closeConnection(editor.connection.id); setMessage(`规则已应用，当前连接已终止并等待重连：${editor.content}`); }
         catch { setMessage(`规则已应用，但当前连接已结束或未能终止：${editor.content}`); }
       } else setMessage(`规则已应用：${editor.content}`);
@@ -257,7 +291,7 @@ export function AuditPage({ data, canManage = false }) {
     <div className="analysis-toolbar"><div className="range-tabs">{DASHBOARD_RANGES.map(([id,label])=><button className={rangeKey===id?"active":""} key={id} onClick={()=>setRangeKey(id)}>{label}</button>)}</div><select value={device} onChange={event=>setDevice(event.target.value)}><option value="">全部设备</option>{data.devices.map(item=><option key={item.ip} value={item.ip}>{item.name} · {item.ip}</option>)}</select><button className="refresh-analysis" onClick={load}><ClockCounterClockwise />{loading ? "加载中" : "刷新"}</button></div>
     <section className="traffic-composition panel"><div className="composition-total"><span>总流量</span><strong>{bytes(totalTraffic)}</strong></div><div className="composition-ring" style={{"--proxy-share":`${proxyPercent * 3.6}deg`}}><i /></div><div className="composition-metric proxy"><span><i />代理流量</span><strong>{bytes(proxyTotal)}</strong><b>{proxyPercent.toFixed(1)}%</b><em>下载 {bytes(totals.proxyDown ?? 0)} · 上传 {bytes(totals.proxyUp ?? 0)}</em></div><div className="composition-metric direct"><span><i />直连流量</span><strong>{bytes(directTotal)}</strong><b>{directPercent.toFixed(1)}%</b></div><div className="composition-devices"><span>涉及设备</span><strong>{totals.proxyDevices ?? (attributionDevices.length || data.devices.length)} 台</strong></div></section>
     <AnomalyGuard data={anomalies} canManage={canManage} onEdit={editAnomalies}/>
-    <TrafficLedger ledger={ledger} route={ledgerRoute} setRoute={setLedgerRoute} order={ledgerOrder} setOrder={setLedgerOrder} query={ledgerQuery} setQuery={setLedgerQuery} canManage={canManage} onAddRule={openQuickRule}/>
+    <TrafficLedger ledger={ledger} range={rangeKey} route={ledgerRoute} setRoute={setLedgerRoute} order={ledgerOrder} setOrder={setLedgerOrder} query={ledgerQuery} setQuery={setLedgerQuery} canManage={canManage} onAddRule={openQuickRule}/>
     <div className="analysis-workspace">
       <section className="service-ranking panel"><div className="compact-panel-head"><h3>代理服务 / 目标排行</h3><div className="analysis-toggle"><button className={groupBy==="service"?"active":""} onClick={()=>setGroupBy("service")}>服务</button><button className={groupBy==="target"?"active":""} onClick={()=>setGroupBy("target")}>目标</button></div></div><div className="ranking-columns"><div className="ranking-list">{items.slice(0,7).map((item,index)=><button className={selectedItem?.id===item.id?"selected":""} key={item.id} onClick={()=>setSelectedService(item.service || item.name)}><b>{index+1}</b><ServiceIcon type={item.icon}/><span><strong>{serviceDisplayName(item.name)}</strong><em>{item.details?.length || 0} 个主机</em></span><span className="ranking-value"><strong>{bytes(item.traffic)}</strong><em>{item.percent}%</em></span></button>)}</div><div className="host-ranking"><h4>{serviceDisplayName(selectedItem?.name || "服务")} 相关主机</h4>{(selectedItem?.details || []).slice(0,6).map(detail=><div key={detail.host}><code>{detail.host}</code><strong>{bytes(detail.up + detail.down)}</strong></div>)}<div className="host-total"><span>合计</span><strong>{bytes(selectedItem?.traffic || 0)}</strong></div></div></div></section>
       <section className="device-attribution panel"><div className="compact-panel-head"><h3>{attribution.service || selectedItem?.name || "服务"} · 来源设备用量</h3><div className="analysis-toggle">{[["hour","按小时"],["day","按天"],["month","按月"]].map(([id,label])=><button key={id} className={attributionPeriod===id?"active":""} onClick={()=>setAttributionPeriod(id)}>{label}</button>)}</div></div><div className="attribution-body"><div className="attribution-chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={attributionChart} margin={{top:12,right:4,left:-10,bottom:0}}><CartesianGrid stroke="var(--grid)" vertical={false}/><XAxis dataKey="time" tickLine={false} axisLine={false} fontSize={11}/><YAxis tickFormatter={bytes} tickLine={false} axisLine={false} fontSize={11} width={58}/><Tooltip content={<UsageTooltip/>}/>{attributionDevices.map((entry,index)=><Bar key={entry.ip} dataKey={entry.ip} name={entry.name} stackId="usage" fill={DEVICE_COLORS[index%DEVICE_COLORS.length]} isAnimationActive={false}/>)}</BarChart></ResponsiveContainer></div><div className="device-usage-table"><div className="device-usage-head"><span>设备</span><span>IP 地址</span><span>累计</span><span>占比</span></div>{attributionDevices.map((entry,index)=><div className="device-usage-row" key={entry.ip}><span><i style={{background:DEVICE_COLORS[index%DEVICE_COLORS.length]}}/>{entry.name}</span><code>{entry.ip}</code><strong>{bytes(entry.traffic)}</strong><b>{entry.percent}%</b></div>)}<div className="device-usage-total"><span>合计</span><strong>{bytes(attributionDevices.reduce((sum,item)=>sum+item.traffic,0))}</strong><b>100%</b></div></div></div></section>

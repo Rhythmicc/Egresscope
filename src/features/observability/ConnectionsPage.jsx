@@ -152,7 +152,7 @@ export function QuickRuleModal({ editor, setEditor, onSave, contextLabel = "实�
     <div className="quick-rule-grid"><label>匹配方式<select value={editor.matchType} onChange={event => setEditor({ ...editor, matchType: event.target.value })}><option value="DOMAIN">精确域名</option><option value="DOMAIN-SUFFIX">域名后缀</option><option value="IP-CIDR">目标 IP</option></select></label><label>目标<input required value={editor.value} onChange={event => setEditor({ ...editor, value: event.target.value })}/></label></div>
     <label>执行策略<select value={editor.policy} onChange={event => setEditor({ ...editor, policy: event.target.value })}>{editor.policies.map(policy => <option key={policy}>{policy}</option>)}</select></label>
     <div className="rule-preview"><span>将写入</span><code>{content}</code></div>
-    {editor.connection.status === "active" && <label className="quick-rule-reconnect"><input type="checkbox" checked={editor.terminateCurrent ?? true} onChange={event => setEditor({ ...editor, terminateCurrent:event.target.checked })}/><strong>应用后终止当前连接，让新规则立即接管重连</strong></label>}
+    {editor.connection.status === "active" && !editor.connection.grouped && <label className="quick-rule-reconnect"><input type="checkbox" checked={editor.terminateCurrent ?? true} onChange={event => setEditor({ ...editor, terminateCurrent:event.target.checked })}/><strong>应用后终止当前连接，让新规则立即接管重连</strong></label>}
     {editor.error && <div className="login-error"><WarningCircle />{editor.error}</div>}
     <button className="primary-button modal-submit" disabled={editor.busy || !editor.policy}>{editor.busy ? "正在应用…" : "保存并应用"}</button>
   </form></div>;

@@ -37,6 +37,30 @@ final result: passed
 
 ---
 
+# 2026-08-13 · 设备-目标流量聚合
+
+## 对照与结果
+
+- 来源截图：`/var/folders/zm/1n48rm8n34b767q9b7k_46sm0000gn/T/codex-clipboard-a63c4cd5-ac86-4bef-aa3a-7d572946fd2f.png`，问题为同一设备访问同一目标产生大量重复行。
+- 最终桌面验收图：`qa/traffic-ledger-grouped-desktop.png`；平板与手机验收图分别为 `qa/traffic-ledger-grouped-tablet.png`、`qa/traffic-ledger-grouped-mobile.png`。
+- 默认行粒度改为设备、目标和出口类型的组合；累计流量、上下行、连接次数、活跃数量和时间跨度均在组合行内呈现。
+- 命中规则或代理路径发生变化时显示种类数量；展开“明细”后可逐条核对时间、流量、规则和出口节点，聚合没有牺牲追溯能力。
+
+## 响应式与交互检查
+
+- 1280 px 桌面：横向溢出由 12 px 降为 0；明细展开后仍保持列对齐。
+- 834 px 平板：组合卡片和展开表格均留在面板内，操作按钮无重叠。
+- 390 px 手机：文档宽度严格等于视口宽度；组合摘要优先展示，原始明细使用面板内横向滚动。
+- 展开/收起、代理/直连切换、排序、搜索和改规则入口均可操作；浏览器控制台无 warning 或 error。
+
+## 剩余问题
+
+- 无 P0、P1 或 P2 问题。
+
+final result: passed
+
+---
+
 # Traffic attribution ledger design QA
 
 ## Visual truth and evidence

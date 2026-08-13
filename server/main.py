@@ -3500,8 +3500,9 @@ def _traffic_ledger(
     query: str,
     limit: int,
     offset: int,
+    group_mode: str = "device-target",
 ) -> dict[str, Any]:
-    """Return connection-level traffic evidence without separating target and exit dimensions."""
+    """Return target-level spend evidence, with connection detail available on demand."""
     now = int(time.time())
     start = _calendar_start("month", now) if range_key == "month" else now - TRAFFIC_LEDGER_RANGES[range_key]
     allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
@@ -3517,7 +3518,7 @@ def _traffic_ledger(
         parameters.extend(sorted(INFRASTRUCTURE_SOURCE_IPS))
     if device:
         if allowed is not None and device not in allowed:
-            return {"range": range_key, "route": route, "summary": {"events": 0, "traffic": 0, "devices": 0}, "events": []}
+            return {"range": range_key, "route": route, "summary": {"events": 0, "groups": 0, "traffic": 0, "devices": 0}, "events": []}
         conditions.append("device = ?")
         parameters.append(device)
     elif allowed is not None:
@@ -3535,7 +3536,9 @@ def _traffic_ledger(
         )
         parameters.extend([pattern] * 5)
     where = " AND ".join(conditions)
-    ordering = "upload_bytes + download_bytes DESC, last_seen_at DESC" if order == "traffic" else "last_seen_at DESC, upload_bytes + download_bytes DESC"
+    connection_ordering = "upload_bytes + download_bytes DESC, last_seen_at DESC" if order == "traffic" else "last_seen_at DESC, upload_bytes + download_bytes DESC"
+    target_expression = "CASE WHEN trim(host) <> '' THEN lower(rtrim(trim(host), '.')) ELSE trim(destination_ip) END"
+    route_expression = "CASE WHEN instr(chain, 'DIRECT') > 0 THEN 'direct' ELSE 'proxy' END"
     with _db() as connection:
         summary = connection.execute(
             f"""
@@ -3546,16 +3549,78 @@ def _traffic_ledger(
             """,
             parameters,
         ).fetchone()
-        rows = connection.execute(
-            f"""
-            SELECT id,device,host,destination_ip,destination_port,network,rule,chain,
-                   started_at,last_seen_at,ended_at,upload_bytes,download_bytes,
-                   rule_type,rule_payload,rule_source,rule_source_id,rule_label
-            FROM connection_sessions WHERE {where}
-            ORDER BY {ordering} LIMIT ? OFFSET ?
-            """,
-            [*parameters, limit, offset],
-        ).fetchall()
+        if group_mode == "connection":
+            rows = connection.execute(
+                f"""
+                SELECT id,device,host,destination_ip,destination_port,network,rule,chain,
+                       started_at,last_seen_at,ended_at,upload_bytes,download_bytes,
+                       rule_type,rule_payload,rule_source,rule_source_id,rule_label,
+                       1 connection_count, CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END active_connections,
+                       1 rule_variants, 1 path_variants, started_at first_started_at,
+                       last_seen_at group_last_seen_at, {route_expression} route_key,
+                       {target_expression} target_key
+                FROM connection_sessions WHERE {where}
+                ORDER BY {connection_ordering} LIMIT ? OFFSET ?
+                """,
+                [*parameters, limit, offset],
+            ).fetchall()
+            group_count = int(summary["events"] or 0)
+        else:
+            grouped_summary = connection.execute(
+                f"""
+                SELECT COUNT(*) groups_count FROM (
+                    SELECT 1 FROM connection_sessions WHERE {where}
+                    GROUP BY device, {target_expression}, {route_expression}
+                )
+                """,
+                parameters,
+            ).fetchone()
+            group_count = int(grouped_summary["groups_count"] or 0)
+            group_ordering = "grouped.upload_bytes + grouped.download_bytes DESC, grouped.group_last_seen_at DESC" if order == "traffic" else "grouped.group_last_seen_at DESC, grouped.upload_bytes + grouped.download_bytes DESC"
+            rows = connection.execute(
+                f"""
+                WITH filtered AS (
+                    SELECT *, {target_expression} target_key, {route_expression} route_key
+                    FROM connection_sessions WHERE {where}
+                ), grouped AS (
+                    SELECT device,target_key,route_key,
+                           COUNT(*) connection_count,
+                           SUM(CASE WHEN ended_at IS NULL THEN 1 ELSE 0 END) active_connections,
+                           SUM(upload_bytes) upload_bytes,
+                           SUM(download_bytes) download_bytes,
+                           MIN(started_at) first_started_at,
+                           MAX(last_seen_at) group_last_seen_at,
+                           SUM(MAX(0, COALESCE(ended_at, ?) - started_at)) duration_seconds,
+                           COUNT(DISTINCT COALESCE(NULLIF(rule_label, ''), NULLIF(rule, ''), 'unknown')) rule_variants,
+                           COUNT(DISTINCT chain) path_variants
+                    FROM filtered GROUP BY device,target_key,route_key
+                ), ranked AS (
+                    SELECT filtered.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY device,target_key,route_key
+                               ORDER BY last_seen_at DESC, upload_bytes + download_bytes DESC, id
+                           ) row_rank
+                    FROM filtered
+                )
+                SELECT ranked.id,ranked.device,ranked.host,ranked.destination_ip,
+                       ranked.destination_port,ranked.network,ranked.rule,ranked.chain,
+                       ranked.started_at,ranked.last_seen_at,ranked.ended_at,
+                       grouped.upload_bytes,grouped.download_bytes,
+                       ranked.rule_type,ranked.rule_payload,ranked.rule_source,
+                       ranked.rule_source_id,ranked.rule_label,
+                       grouped.connection_count,grouped.active_connections,
+                       grouped.rule_variants,grouped.path_variants,
+                       grouped.first_started_at,grouped.group_last_seen_at,
+                       grouped.duration_seconds,grouped.route_key,grouped.target_key
+                FROM grouped JOIN ranked
+                  ON ranked.device = grouped.device
+                 AND ranked.target_key = grouped.target_key
+                 AND ranked.route_key = grouped.route_key
+                 AND ranked.row_rank = 1
+                ORDER BY {group_ordering} LIMIT ? OFFSET ?
+                """,
+                [*parameters, now, limit, offset],
+            ).fetchall()
     aliases = _aliases()
     try:
         group_names = set(rule_workspace.summary().get("availablePolicies") or [])
@@ -3574,12 +3639,15 @@ def _traffic_ledger(
         except (json.JSONDecodeError, TypeError):
             chain = [str(row["chain"] or "")]
         chain = [item for item in chain if item] or ["DIRECT"]
-        direct = "DIRECT" in chain
+        direct = str(row["route_key"]) == "direct"
         policies = [item for item in chain if item in group_names]
         policy = policies[-1] if policies else ("DIRECT" if direct else (chain[-2] if len(chain) > 1 else chain[-1]))
         node = "DIRECT" if direct else (chain[-1] if chain[-1] != policy else "")
-        started_at = int(row["started_at"] or row["last_seen_at"] or now)
-        ended_at = int(row["ended_at"]) if row["ended_at"] is not None else None
+        grouped = group_mode != "connection"
+        started_at = int(row["first_started_at"] or row["started_at"] or row["last_seen_at"] or now)
+        last_seen_at = int(row["group_last_seen_at"] or row["last_seen_at"] or started_at)
+        active_connections = int(row["active_connections"] or 0)
+        ended_at = None if active_connections else last_seen_at
         target_host = str(row["host"] or "")
         destination_ip = str(row["destination_ip"] or "")
         service, _ = _service_for(target_host, destination_ip)
@@ -3591,7 +3659,9 @@ def _traffic_ledger(
         )
         events.append(
             {
-                "id": str(row["id"]),
+                "id": f"{row['device']}|{row['route_key']}|{row['target_key']}" if grouped else str(row["id"]),
+                "latestConnectionId": str(row["id"]),
+                "grouped": grouped,
                 "status": "active" if ended_at is None else "ended",
                 "device": aliases.get(str(row["device"]), str(row["device"])),
                 "sourceIP": str(row["device"]),
@@ -3612,9 +3682,14 @@ def _traffic_ledger(
                 "policy": policy,
                 "node": node,
                 "startedAt": started_at,
-                "lastSeenAt": int(row["last_seen_at"] or started_at),
+                "lastSeenAt": last_seen_at,
                 "endedAt": ended_at,
-                "durationSeconds": max(0, (ended_at or now) - started_at),
+                "durationSeconds": int(row["duration_seconds"] or 0) if grouped else max(0, (ended_at or now) - started_at),
+                "spanSeconds": max(0, last_seen_at - started_at),
+                "connectionCount": int(row["connection_count"] or 1),
+                "activeConnections": active_connections,
+                "ruleVariants": int(row["rule_variants"] or 1),
+                "pathVariants": int(row["path_variants"] or 1),
                 "upload": int(row["upload_bytes"] or 0),
                 "download": int(row["download_bytes"] or 0),
                 "traffic": int(row["upload_bytes"] or 0) + int(row["download_bytes"] or 0),
@@ -3627,9 +3702,10 @@ def _traffic_ledger(
         "route": route,
         "order": order,
         "retentionDays": settings.retention_days,
-        "precision": {"unit": "connection", "target": "host-or-ip", "urlPathAvailable": False},
+        "precision": {"unit": "device-target" if group_mode != "connection" else "connection", "target": "host-or-ip", "urlPathAvailable": False},
         "summary": {
             "events": int(summary["events"] or 0),
+            "groups": group_count,
             "devices": int(summary["devices"] or 0),
             "upload": upload,
             "download": download,
@@ -3655,6 +3731,7 @@ async def traffic_ledger(
     range: str = Query(default="24h", pattern="^(live|1h|6h|24h|7d|14d|month)$"),
     route: str = Query(default="proxy", pattern="^(proxy|direct|all)$"),
     order: str = Query(default="traffic", pattern="^(traffic|recent)$"),
+    group: str = Query(default="device-target", pattern="^(device-target|connection)$"),
     device: str = Query(default="", max_length=80),
     query: str = Query(default="", max_length=120),
     limit: int = Query(default=100, ge=1, le=500),
@@ -3662,7 +3739,7 @@ async def traffic_ledger(
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     return await asyncio.to_thread(
-        _traffic_ledger, user, range, route, order, device.strip(), query.strip(), limit, offset
+        _traffic_ledger, user, range, route, order, device.strip(), query.strip(), limit, offset, group
     )
 
 

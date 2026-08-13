@@ -159,6 +159,7 @@ class DatabaseMigrationTests(unittest.TestCase):
                     """,
                     (
                         ("model-download", "192.168.31.42", "huggingface.co", "1.1.1.1", "443", "tcp", "AI 模型", '["节点选择","美国最佳","us-lax-03"]', now - 600, now - 10, now - 10, 1024, 8 * 1024**3, "RuleSet", "ssslab-ai", "rule-set", "ai", "AI 模型"),
+                        ("model-download-2", "192.168.31.42", "huggingface.co", "1.1.1.2", "443", "tcp", "最终兜底", '["节点选择","美国最佳","us-sjc-02"]', now - 900, now - 20, now - 20, 2048, 2 * 1024**3, "Match", "", "fallback", "fallback-0", "最终兜底"),
                         ("direct", "192.168.31.42", "mirrors.local", "192.168.31.9", "443", "tcp", "实验室内网", '["全球直连","DIRECT"]', now - 300, now - 5, now - 5, 100, 200, "DomainSuffix", "local", "custom", "lan", "实验室内网"),
                         ("other-device", "192.168.31.225", "example.com", "2.2.2.2", "443", "tcp", "最终兜底", '["节点选择","香港最佳","hk-01"]', now - 200, now - 5, now - 5, 300, 400, "Match", "", "fallback", "fallback-0", "最终兜底"),
                     ),
@@ -171,13 +172,22 @@ class DatabaseMigrationTests(unittest.TestCase):
             with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now), patch.object(rule_workspace, "summary", return_value={"availablePolicies": ["节点选择", "美国最佳", "香港最佳", "全球直连"]}), patch.object(rule_workspace, "match_catalog", return_value=catalog):
                 proxy = _traffic_ledger({"role": "viewer", "allowedDevices": ["192.168.31.42"]}, "24h", "proxy", "traffic", "", "", 100, 0)
                 direct = _traffic_ledger({"role": "viewer", "allowedDevices": ["192.168.31.42"]}, "24h", "direct", "traffic", "", "", 100, 0)
-            self.assertEqual(proxy["summary"]["events"], 1)
+            self.assertEqual(proxy["summary"]["events"], 2)
+            self.assertEqual(proxy["summary"]["groups"], 1)
+            self.assertEqual(len(proxy["events"]), 1)
             self.assertEqual(proxy["events"][0]["host"], "huggingface.co")
             self.assertEqual(proxy["events"][0]["device"], "192.168.31.42")
             self.assertEqual(proxy["events"][0]["rule"], "AI 模型")
             self.assertEqual(proxy["events"][0]["policy"], "美国最佳")
             self.assertEqual(proxy["events"][0]["node"], "us-lax-03")
-            self.assertEqual(proxy["events"][0]["traffic"], 8 * 1024**3 + 1024)
+            self.assertEqual(proxy["events"][0]["traffic"], 10 * 1024**3 + 3072)
+            self.assertEqual(proxy["events"][0]["connectionCount"], 2)
+            self.assertEqual(proxy["events"][0]["ruleVariants"], 2)
+            self.assertEqual(proxy["events"][0]["pathVariants"], 2)
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now), patch.object(rule_workspace, "summary", return_value={"availablePolicies": ["节点选择", "美国最佳", "香港最佳", "全球直连"]}), patch.object(rule_workspace, "match_catalog", return_value=catalog):
+                details = _traffic_ledger({"role": "viewer", "allowedDevices": ["192.168.31.42"]}, "24h", "proxy", "recent", "192.168.31.42", "huggingface.co", 100, 0, "connection")
+            self.assertEqual(len(details["events"]), 2)
+            self.assertTrue(all(not row["grouped"] for row in details["events"]))
             self.assertEqual(direct["events"][0]["route"], "direct")
 
     def test_gateway_events_are_persistent_filterable_and_deduplicated(self):
