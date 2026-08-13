@@ -105,6 +105,7 @@ TRAFFIC_LEDGER_RANGES = {
     "month": 30 * 24 * 60 * 60,
 }
 TRAFFIC_LEDGER_SIGNIFICANT_BYTES = 1024**2
+CONNECTION_SESSION_RETENTION_DAYS = 32
 
 
 def _is_infrastructure_source(address: str) -> bool:
@@ -2244,6 +2245,7 @@ class TrafficCollector:
         if unknown_up or unknown_down:
             rows.append((ts, "unknown", "UNKNOWN", unknown_up, unknown_down, 0, sample_interval))
         cutoff = ts - settings.retention_days * 86400
+        connection_cutoff = ts - max(settings.retention_days, CONNECTION_SESSION_RETENTION_DAYS) * 86400
         day_start = _calendar_start("day", ts)
         daily_rows = [(day_start, row[1], row[2], row[3], row[4], row[5], 1) for row in rows]
         daily_detail_rows = [(day_start, row[1], row[2], row[3], row[4], row[5], row[6], row[7]) for row in detail_rows]
@@ -2344,7 +2346,7 @@ class TrafficCollector:
             connection.execute("DELETE FROM traffic_samples WHERE ts < ?", (cutoff,))
             connection.execute("DELETE FROM traffic_detail_samples WHERE ts < ?", (cutoff,))
             connection.execute("DELETE FROM traffic_flow_samples WHERE ts < ?", (cutoff,))
-            connection.execute("DELETE FROM connection_sessions WHERE last_seen_at < ?", (cutoff,))
+            connection.execute("DELETE FROM connection_sessions WHERE last_seen_at < ?", (connection_cutoff,))
             connection.execute("DELETE FROM traffic_detail_daily_rollups WHERE day_start < ?", (day_start - 400 * 86400,))
             connection.execute("DELETE FROM traffic_flow_daily_rollups WHERE day_start < ?", (day_start - 400 * 86400,))
 
@@ -3479,7 +3481,7 @@ def _connection_statistics(
     return {
         "range": range_key,
         "status": status,
-        "retentionDays": settings.retention_days,
+        "retentionDays": max(settings.retention_days, CONNECTION_SESSION_RETENTION_DAYS),
         "summary": {
             "active": int(summary["active"] or 0),
             "history": int(summary["history"] or 0),
@@ -3723,7 +3725,7 @@ def _traffic_ledger(
         "order": order,
         "visibility": visibility,
         "significantThresholdBytes": TRAFFIC_LEDGER_SIGNIFICANT_BYTES,
-        "retentionDays": settings.retention_days,
+        "retentionDays": max(settings.retention_days, CONNECTION_SESSION_RETENTION_DAYS),
         "precision": {"unit": "device-target" if group_mode != "connection" else "connection", "target": "host-or-ip", "urlPathAvailable": False},
         "summary": {
             "events": int(summary["events"] or 0),
@@ -3921,15 +3923,15 @@ async def traffic_analysis(
     primary = "service" if groupBy == "service" else "host"
     with _db() as connection:
         rows = connection.execute(
-            f"SELECT {primary} name, MIN(service) service, SUM(up_bytes) up, SUM(down_bytes) down, SUM(connections) connections FROM {source_table} WHERE {where} AND exit_mode != 'direct' GROUP BY {primary}",
+            f"SELECT {primary} name, MIN(service) service, SUM(up_bytes) up, SUM(down_bytes) down, SUM(connections) connections FROM {source_table} WHERE {where} AND exit_mode = 'proxy' GROUP BY {primary}",
             values,
         ).fetchall()
         detail_rows = connection.execute(
-            f"SELECT service, host, SUM(up_bytes) up, SUM(down_bytes) down, SUM(connections) connections FROM {source_table} WHERE {where} AND exit_mode != 'direct' GROUP BY service, host ORDER BY up + down DESC",
+            f"SELECT service, host, SUM(up_bytes) up, SUM(down_bytes) down, SUM(connections) connections FROM {source_table} WHERE {where} AND exit_mode = 'proxy' GROUP BY service, host ORDER BY up + down DESC",
             values,
         ).fetchall() if groupBy == "service" else []
         proxy_device_rows = connection.execute(
-            f"SELECT DISTINCT device FROM {source_table} WHERE {where} AND exit_mode != 'direct' AND device != 'unknown'",
+            f"SELECT DISTINCT device FROM {source_table} WHERE {where} AND exit_mode = 'proxy' AND device != 'unknown'",
             values,
         ).fetchall()
         total_table = "traffic_daily_rollups" if use_daily else "traffic_samples"
@@ -3950,28 +3952,42 @@ async def traffic_analysis(
             f"SELECT COALESCE(SUM(up_bytes),0) up,COALESCE(SUM(down_bytes),0) down FROM {total_table} WHERE {total_where}",
             total_values,
         ).fetchone()
-        flow_table = "traffic_class_daily_rollups" if use_daily else "traffic_flow_samples"
-        flow_time = "day_start" if use_daily else "ts"
-        direct_predicate = "route_class = 'direct'" if use_daily else "instr(chain, 'DIRECT') > 0"
-        direct_conditions = [f"{flow_time} >= ?", direct_predicate]
-        direct_values: list[Any] = [started_at]
+        class_table = "traffic_class_daily_rollups" if use_daily else "traffic_samples"
+        class_time = "day_start" if use_daily else "ts"
+        class_expression = "route_class" if use_daily else "CASE WHEN chain = 'DIRECT' THEN 'direct' WHEN chain = 'UNKNOWN' THEN 'unknown' ELSE 'proxy' END"
+        class_conditions = [f"{class_time} >= ?"]
+        class_values: list[Any] = [started_at]
         if device:
-            direct_conditions.append("device = ?")
-            direct_values.append(device)
+            class_conditions.append("device = ?")
+            class_values.append(device)
         elif user["role"] != "admin":
             if not allowed:
-                direct_conditions.append("1 = 0")
+                class_conditions.append("1 = 0")
             else:
-                direct_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
-                direct_values.extend(sorted(allowed))
-        direct_row = connection.execute(
-            f"SELECT COALESCE(SUM(up_bytes),0) up,COALESCE(SUM(down_bytes),0) down FROM {flow_table} WHERE {' AND '.join(direct_conditions)}",
-            direct_values,
-        ).fetchone()
+                class_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
+                class_values.extend(sorted(allowed))
+        class_rows = connection.execute(
+            f"SELECT {class_expression} route_class,COALESCE(SUM(up_bytes),0) up,COALESCE(SUM(down_bytes),0) down FROM {class_table} WHERE {' AND '.join(class_conditions)} GROUP BY {class_expression}",
+            class_values,
+        ).fetchall()
     total_up, total_down = int(total_row["up"] or 0), int(total_row["down"] or 0)
-    direct_up = min(total_up, int(direct_row["up"] or 0))
-    direct_down = min(total_down, int(direct_row["down"] or 0))
-    proxy_up, proxy_down = max(0, total_up - direct_up), max(0, total_down - direct_down)
+    class_totals = {str(row["route_class"]): (int(row["up"] or 0), int(row["down"] or 0)) for row in class_rows}
+
+    def reconcile_classes(total: int, direct: int, proxy: int) -> tuple[int, int, int]:
+        classified = direct + proxy
+        if classified <= total:
+            return direct, proxy, total - classified
+        if classified <= 0:
+            return 0, 0, total
+        direct_scaled = direct * total // classified
+        return direct_scaled, total - direct_scaled, 0
+
+    direct_up, proxy_up, unknown_up = reconcile_classes(
+        total_up, class_totals.get("direct", (0, 0))[0], class_totals.get("proxy", (0, 0))[0]
+    )
+    direct_down, proxy_down, unknown_down = reconcile_classes(
+        total_down, class_totals.get("direct", (0, 0))[1], class_totals.get("proxy", (0, 0))[1]
+    )
     total_connections = sum(int(row["connections"] or 0) for row in rows)
     raw_detail_total = sum(int(row["up"] or 0) + int(row["down"] or 0) for row in rows)
     detail_scale = (proxy_up + proxy_down) / raw_detail_total if raw_detail_total else 0
@@ -4000,7 +4016,7 @@ async def traffic_analysis(
         else:
             attr_table, attr_time, attr_start = "traffic_detail_daily_rollups", "day_start", _calendar_start("year", now) - 32 * 86400
             bucket_expr = f"strftime('%Y-%m', {attr_time}, 'unixepoch', '+8 hours')"
-        attr_conditions = [f"{attr_time} >= ?", "service = ?", "exit_mode != 'direct'"]
+        attr_conditions = [f"{attr_time} >= ?", "service = ?", "exit_mode = 'proxy'"]
         attr_values: list[Any] = [attr_start, selected_service]
         if device:
             attr_conditions.append("device = ?")
@@ -4055,6 +4071,9 @@ async def traffic_analysis(
             "directUp": direct_up,
             "directDown": direct_down,
             "direct": direct_up + direct_down,
+            "unknownUp": unknown_up,
+            "unknownDown": unknown_down,
+            "unknown": unknown_up + unknown_down,
             "proxyDevices": sum(1 for row in proxy_device_rows if not _is_infrastructure_source(str(row["device"]))),
         },
         "items": items[:50],

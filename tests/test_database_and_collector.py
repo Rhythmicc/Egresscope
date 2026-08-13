@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server.database import LATEST_SCHEMA_VERSION, connect, migrate
-from server.main import RuleWorkspace, TrafficCollector, _connection_statistics, _gateway_events, _record_gateway_event, _traffic_ledger, rule_workspace, settings
+from server.main import RuleWorkspace, TrafficCollector, _connection_statistics, _gateway_events, _record_gateway_event, _traffic_ledger, rule_workspace, settings, traffic_analysis
 
 
 class DatabaseMigrationTests(unittest.TestCase):
@@ -122,7 +123,8 @@ class DatabaseMigrationTests(unittest.TestCase):
                         ("active", "192.168.31.42", "github.com", "1.1.1.1", "443", "tcp", "GitHub", '["节点选择","美国最佳"]', now - 60, now, None, 100, 900),
                         ("recent", "192.168.31.42", "openai.com", "2.2.2.2", "443", "tcp", "OpenAI", '["节点选择","美国最佳"]', now - 3600, now - 1800, now - 1800, 200, 800),
                         ("other", "192.168.31.225", "example.com", "3.3.3.3", "80", "tcp", "DIRECT", '["DIRECT"]', now - 3600, now - 1800, now - 1800, 50, 50),
-                        ("expired", "192.168.31.42", "old.example", "4.4.4.4", "443", "tcp", "Match", '["DIRECT"]', now - 31 * 86400, now - 31 * 86400, now - 31 * 86400, 1, 1),
+                        ("month-edge", "192.168.31.42", "month.example", "4.4.4.4", "443", "tcp", "Match", '["DIRECT"]', now - 31 * 86400, now - 31 * 86400, now - 31 * 86400, 1, 1),
+                        ("expired", "192.168.31.42", "old.example", "5.5.5.5", "443", "tcp", "Match", '["DIRECT"]', now - 33 * 86400, now - 33 * 86400, now - 33 * 86400, 1, 1),
                     ),
                 )
             collector = TrafficCollector()
@@ -134,6 +136,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             with connect(database) as connection:
                 remaining = {row[0] for row in connection.execute("SELECT id FROM connection_sessions")}
             self.assertNotIn("expired", remaining)
+            self.assertIn("month-edge", remaining)
             self.assertIn("recent", remaining)
 
     def test_traffic_ledger_keeps_device_target_rule_and_exit_in_one_event(self):
@@ -196,6 +199,53 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(len(details["events"]), 2)
             self.assertTrue(all(not row["grouped"] for row in details["events"]))
             self.assertEqual(direct["events"][0]["route"], "direct")
+
+    def test_monthly_analysis_keeps_proxy_direct_and_unknown_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(settings, data_dir=data_dir, device_aliases_path=data_dir / "devices.json")
+            now = 1_786_610_000
+            day_start = now - ((now + 8 * 3600) % 86400)
+            with connect(database) as connection:
+                migrate(connection)
+                connection.execute(
+                    "INSERT INTO traffic_daily_rollups VALUES(?,?,?,?,?,?,?)",
+                    (day_start, "192.168.31.42", "mixed", 400, 600, 1, 1),
+                )
+                connection.executemany(
+                    "INSERT INTO traffic_class_daily_rollups VALUES(?,?,?,?,?)",
+                    (
+                        (day_start, "192.168.31.42", "direct", 100, 200),
+                        (day_start, "192.168.31.42", "proxy", 200, 300),
+                    ),
+                )
+                connection.executemany(
+                    "INSERT INTO traffic_detail_daily_rollups VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        (day_start, "192.168.31.42", "OpenAI", "chatgpt.com", "proxy", 200, 300, 2),
+                        (day_start, "192.168.31.42", "Unknown", "unknown.example", "unknown", 5000, 5000, 1),
+                    ),
+                )
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now):
+                result = asyncio.run(
+                    traffic_analysis(
+                        range="month",
+                        device=None,
+                        groupBy="service",
+                        metric="traffic",
+                        service=None,
+                        attributionPeriod="day",
+                        user={"role": "admin", "allowedDevices": []},
+                    )
+                )
+            totals = result["totals"]
+            self.assertEqual(totals["traffic"], 1000)
+            self.assertEqual(totals["proxy"], 500)
+            self.assertEqual(totals["direct"], 300)
+            self.assertEqual(totals["unknown"], 200)
+            self.assertEqual(totals["proxy"] + totals["direct"] + totals["unknown"], totals["traffic"])
+            self.assertEqual([(item["name"], item["traffic"]) for item in result["items"]], [("OpenAI", 500)])
 
     def test_gateway_events_are_persistent_filterable_and_deduplicated(self):
         with tempfile.TemporaryDirectory() as directory:
