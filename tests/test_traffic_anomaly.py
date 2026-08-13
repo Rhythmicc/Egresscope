@@ -4,10 +4,39 @@ from pathlib import Path
 
 from server.database import connect, migrate
 from server.traffic_anomaly import (
+    DEFAULT_WINDOW_SECONDS,
+    TargetTrafficWindow,
     TrafficAnomalyStore,
     is_protected_target,
     target_rule,
 )
+
+
+class TargetTrafficWindowTests(unittest.TestCase):
+    def test_aggregates_same_device_and_target_across_connections(self):
+        window = TargetTrafficWindow()
+        now = 10_000
+        window.record(now - 20, "192.168.31.42", "cdn.example.com", 10, 20)
+        window.record(now - 5, "192.168.31.42", "cdn.example.com", 30, 40)
+        window.record(now - 5, "192.168.31.225", "cdn.example.com", 100, 200)
+        self.assertEqual(
+            window.usage("192.168.31.42", "CDN.EXAMPLE.COM.", now),
+            {"upload": 40, "download": 60, "traffic": 100},
+        )
+
+    def test_prunes_samples_outside_five_minute_window(self):
+        window = TargetTrafficWindow()
+        now = 10_000
+        window.record(now - DEFAULT_WINDOW_SECONDS - 1, "192.168.31.42", "cdn.example.com", 100, 200)
+        window.record(now, "192.168.31.42", "cdn.example.com", 1, 2)
+        self.assertEqual(window.usage("192.168.31.42", "cdn.example.com", now)["traffic"], 3)
+
+    def test_global_prune_discards_inactive_target_state(self):
+        window = TargetTrafficWindow()
+        now = 10_000
+        window.record(now - DEFAULT_WINDOW_SECONDS - 1, "192.168.31.42", "old.example.com", 100, 200)
+        window.prune(now)
+        self.assertEqual(window.usage("192.168.31.42", "old.example.com", now)["traffic"], 0)
 
 
 class TrafficAnomalyRuleTests(unittest.TestCase):
@@ -59,7 +88,7 @@ class TrafficAnomalyStoreTests(unittest.TestCase):
         self.assertTrue(updated["autonomous"])
         self.assertEqual(updated["thresholdBytes"], 2 * 1024**3)
 
-    def test_reservation_deduplicates_one_connection_threshold_event(self):
+    def test_reservation_deduplicates_same_device_target_window(self):
         connection = {
             "id": "connection-1",
             "device": "U55C",
@@ -68,18 +97,20 @@ class TrafficAnomalyStoreTests(unittest.TestCase):
             "destinationIP": "8.8.8.8",
             "upload": 10,
             "download": 20,
+            "windowTraffic": 30,
             "route": "proxy",
             "rule": "最终兜底",
             "policy": "美国最佳",
             "node": "美国 01",
         }
         first = self.store.reserve(connection, 100)
-        second = self.store.reserve(connection, 100)
+        second = self.store.reserve({**connection, "id": "connection-2", "anomalyKey": "next-event"}, 100)
         self.assertIsInstance(first, int)
         self.assertIsNone(second)
         actions = self.store.list_actions(allowed_devices=None)
         self.assertEqual(actions["count"], 1)
         self.assertEqual(actions["actions"][0]["status"], "analyzing")
+        self.assertEqual(actions["actions"][0]["traffic"], 30)
 
 
 if __name__ == "__main__":

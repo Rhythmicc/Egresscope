@@ -57,9 +57,12 @@ from .subscription_ai import (
     normalize_filter,
 )
 from .traffic_anomaly import (
+    DEFAULT_WINDOW_SECONDS,
+    TargetTrafficWindow,
     TrafficAnomalyAnalyzer,
     TrafficAnomalyStore,
     is_protected_target,
+    normalized_target,
     target_rule,
 )
 
@@ -1625,9 +1628,11 @@ async def _handle_traffic_anomaly(
     anomaly_settings: dict[str, Any],
 ) -> None:
     """Classify and, when explicitly enabled, execute one constrained response."""
-    traffic = int(connection.get("upload") or 0) + int(connection.get("download") or 0)
+    traffic = int(connection.get("windowTraffic") or 0)
+    window_seconds = int(connection.get("windowSeconds") or DEFAULT_WINDOW_SECONDS)
+    window_minutes = max(1, round(window_seconds / 60))
     decision = str(anomaly_settings.get("actionPolicy") or "ai")
-    reason = "达到管理员设置的单连接流量阈值"
+    reason = f"同一设备访问同一目标在 {window_minutes} 分钟内达到管理员设置的流量阈值"
     try:
         if decision == "ai":
             result = await traffic_anomaly_ai.decide(connection)
@@ -1641,14 +1646,18 @@ async def _handle_traffic_anomaly(
     host = str(connection.get("host") or "")
     destination_ip = str(connection.get("destinationIP") or "")
     target = host or destination_ip or "未知目标"
-    title = "检测到高流量连接"
+    affected_ids = list(dict.fromkeys(str(item) for item in connection.get("affectedConnectionIds") or [] if item))
+    title = "检测到异常流量"
     detail = {
         "actionId": action_id,
         "connectionId": connection.get("id"),
+        "affectedConnectionIds": affected_ids,
+        "affectedConnections": len(affected_ids),
         "device": connection.get("device"),
         "sourceIP": connection.get("sourceIP"),
         "target": target,
         "trafficBytes": traffic,
+        "windowSeconds": window_seconds,
         "decision": decision,
         "reason": reason,
         "policy": connection.get("policy"),
@@ -1668,7 +1677,7 @@ async def _handle_traffic_anomaly(
             "warning",
             "traffic-anomaly",
             title,
-            f"{connection.get('device')} 访问 {target} 已使用 {_human_bytes(traffic)}；建议：{_anomaly_decision_label(decision)}。",
+            f"{connection.get('device')} 在 {window_minutes} 分钟内访问 {target} 已使用 {_human_bytes(traffic)}；建议：{_anomaly_decision_label(decision)}。",
             detail,
             f"traffic-anomaly:{action_id}",
         )
@@ -1704,9 +1713,12 @@ async def _handle_traffic_anomaly(
                 f"异常守卫：{connection.get('device')} · {target}",
             )
             await rule_workspace.apply()
-        connection_id = str(connection.get("id") or "")
-        if connection_id:
-            await mihomo.delete(f"/connections/{quote(connection_id, safe='')}")
+        if not affected_ids:
+            connection_id = str(connection.get("id") or "")
+            affected_ids = [connection_id] if connection_id else []
+        closed, failed = await mihomo.close_connections(affected_ids)
+        if failed:
+            raise RuntimeError(f"{failed} 个受影响连接终止失败")
         await asyncio.to_thread(
             traffic_anomalies.complete,
             action_id,
@@ -1719,9 +1731,9 @@ async def _handle_traffic_anomaly(
             _record_gateway_event,
             "warning",
             "traffic-anomaly",
-            "高流量连接已自动处置",
-            f"已终止 {connection.get('device')} 到 {target} 的连接，并写入规则：{rule_content}",
-            {**detail, "rule": rule_content, "executed": True},
+            "异常流量已自动处置",
+            f"已终止 {connection.get('device')} 到 {target} 的 {closed} 个活动连接，并写入规则：{rule_content}",
+            {**detail, "rule": rule_content, "executed": True, "closedConnections": closed},
             f"traffic-anomaly:{action_id}",
         )
         await asyncio.to_thread(
@@ -1879,6 +1891,7 @@ class TrafficCollector:
         self._pending_interval = 0.0
         self._detail_pending: dict[tuple[str, str, str, str], dict[str, int]] = {}
         self._flow_pending: dict[tuple[str, str, str], dict[str, int]] = {}
+        self._anomaly_window = TargetTrafficWindow()
         self._anomaly_tasks: set[asyncio.Task[Any]] = set()
 
     def initialize(self) -> None:
@@ -1903,10 +1916,28 @@ class TrafficCollector:
                 "SELECT ts,SUM(up_bytes) up,SUM(down_bytes) down,MAX(interval_seconds) interval_seconds FROM traffic_samples WHERE ts >= ? GROUP BY ts ORDER BY ts DESC LIMIT 900",
                 (now - 3600,),
             ).fetchall()
+            anomaly_history = connection.execute(
+                """
+                SELECT ts,device,host,SUM(up_bytes) up,SUM(down_bytes) down
+                FROM traffic_detail_samples
+                WHERE ts >= ? AND exit_mode = 'proxy'
+                GROUP BY ts,device,host
+                ORDER BY ts
+                """,
+                (now - DEFAULT_WINDOW_SECONDS,),
+            ).fetchall()
         for row in reversed(history):
             ts = int(row["ts"])
             elapsed = max(1, int(row["interval_seconds"] or 10))
             self.timeline.append({"time": _display_datetime(ts).strftime("%H:%M:%S"), "up": round(int(row["up"] or 0) / elapsed), "down": round(int(row["down"] or 0) / elapsed)})
+        for row in anomaly_history:
+            self._anomaly_window.record(
+                int(row["ts"]),
+                str(row["device"]),
+                str(row["host"]),
+                int(row["up"] or 0),
+                int(row["down"] or 0),
+            )
 
     async def run(self) -> None:
         while not self._stop.is_set():
@@ -1948,6 +1979,7 @@ class TrafficCollector:
         current: dict[str, tuple[int, int, float]] = {}
         transformed: list[dict[str, Any]] = []
         session_rows: list[tuple[Any, ...]] = []
+        anomaly_deltas: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
         device_rollup: dict[str, dict[str, Any]] = defaultdict(lambda: {"active": 0, "up": 0, "down": 0, "total": 0})
         chain_rollup: dict[str, int] = defaultdict(int)
         try:
@@ -2020,6 +2052,11 @@ class TrafficCollector:
             row["route"] = exit_mode
             row["policy"] = "DIRECT" if exit_mode == "direct" else (display_chain[-2] if len(display_chain) > 1 else display_chain[-1])
             row["node"] = "DIRECT" if exit_mode == "direct" else display_chain[-1]
+            anomaly_target = normalized_target(host, destination_ip)
+            if exit_mode == "proxy" and anomaly_target and (connection_up_delta or connection_down_delta):
+                anomaly_delta = anomaly_deltas[(source_ip, anomaly_target)]
+                anomaly_delta[0] += connection_up_delta
+                anomaly_delta[1] += connection_down_delta
             transformed.append(row)
             session_rows.append(
                 (
@@ -2115,15 +2152,42 @@ class TrafficCollector:
         anomaly_settings = await asyncio.to_thread(traffic_anomalies.get_settings)
         if anomaly_settings["enabled"]:
             threshold = int(anomaly_settings["thresholdBytes"])
-            for row in transformed:
-                if row["route"] != "proxy" or int(row["upload"]) + int(row["download"]) < threshold:
+            window_seconds = int(anomaly_settings.get("windowSeconds") or DEFAULT_WINDOW_SECONDS)
+            self._anomaly_window.prune(wall_time, window_seconds)
+            for (source_ip, target), (upload_delta, download_delta) in anomaly_deltas.items():
+                self._anomaly_window.record(wall_time, source_ip, target, upload_delta, download_delta)
+                usage = self._anomaly_window.usage(source_ip, target, wall_time, window_seconds)
+                if usage["traffic"] < threshold:
                     continue
-                if is_protected_target(row["host"], row["destinationIP"], anomaly_settings["protectedTargets"]):
+                matching = [
+                    row for row in transformed
+                    if row["route"] == "proxy"
+                    and row["sourceIP"] == source_ip
+                    and normalized_target(row["host"], row["destinationIP"]) == target
+                ]
+                if not matching:
                     continue
-                action_id = await asyncio.to_thread(traffic_anomalies.reserve, row, threshold)
+                representative = max(matching, key=lambda row: int(row["upload"]) + int(row["download"]))
+                if is_protected_target(representative["host"], representative["destinationIP"], anomaly_settings["protectedTargets"]):
+                    continue
+                candidate = {
+                    **representative,
+                    "windowTraffic": usage["traffic"],
+                    "windowUpload": usage["upload"],
+                    "windowDownload": usage["download"],
+                    "windowSeconds": window_seconds,
+                    "affectedConnectionIds": [row["id"] for row in matching if row.get("id")],
+                    "anomalyKey": f"{source_ip}:{target}:{wall_time}",
+                }
+                action_id = await asyncio.to_thread(
+                    traffic_anomalies.reserve,
+                    candidate,
+                    threshold,
+                    window_seconds,
+                )
                 if action_id is None:
                     continue
-                task = asyncio.create_task(_handle_traffic_anomaly(action_id, dict(row), anomaly_settings))
+                task = asyncio.create_task(_handle_traffic_anomaly(action_id, candidate, anomaly_settings))
                 self._anomaly_tasks.add(task)
                 task.add_done_callback(self._anomaly_tasks.discard)
 

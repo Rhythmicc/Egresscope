@@ -78,7 +78,7 @@ const DEMO_ANOMALIES = {
   count: 2,
   canManage: true,
   ai: { configured: true, providerLabel: "DeepSeek", model: "deepseek-v4-flash" },
-  settings: { enabled: true, autonomous: true, thresholdBytes: 5 * 1024 ** 3, actionPolicy: "ai", cooldownSeconds: 3600, protectedTargets: ["router.local"] },
+  settings: { enabled: true, autonomous: true, thresholdBytes: 5 * 1024 ** 3, windowSeconds: 300, actionPolicy: "ai", cooldownSeconds: 3600, protectedTargets: ["router.local"] },
   actions: [
     { id: 1, device: "U55C", host: "cdn-lfs.huggingface.co", traffic: 6.4 * 1024 ** 3, decision: "direct", status: "executed", reason: "可信模型文件下载，已改走直连", ruleContent: "DOMAIN,cdn-lfs.huggingface.co,DIRECT", createdAt: 1786593600 },
     { id: 2, device: "192.168.31.177", host: "unknown-pool.example", traffic: 5.7 * 1024 ** 3, decision: "block", status: "executed", reason: "持续高流量且目标无法归类", ruleContent: "DOMAIN,unknown-pool.example,REJECT", createdAt: 1786589200 },
@@ -147,7 +147,7 @@ function AnomalyGuard({ data, canManage, onEdit }) {
   const settings = data.settings || {};
   return <section className={`anomaly-guard panel ${settings.autonomous ? "is-armed" : ""}`}>
     <div className="anomaly-identity"><span className="anomaly-icon"><ShieldCheck weight="fill" /></span><div><h3>异常守卫</h3><strong>{settings.enabled ? settings.autonomous ? "自动处置已启用" : "监测中 · 等待确认" : "已暂停"}</strong></div></div>
-    <div className="anomaly-threshold"><span>单连接阈值</span><strong>{bytes(settings.thresholdBytes || 0)}</strong></div>
+    <div className="anomaly-threshold"><span>{Math.round((settings.windowSeconds || 300) / 60)} 分钟同目标阈值</span><strong>{bytes(settings.thresholdBytes || 0)}</strong></div>
     <div className="anomaly-policy"><span>处置方式</span><strong>{settings.actionPolicy === "ai" ? `${data.ai?.providerLabel || "AI"} 决策` : anomalyDecision(settings.actionPolicy)}</strong></div>
     <div className="anomaly-latest">{latest ? <><span className={`anomaly-state ${latest.status}`}>{anomalyStatus(latest.status)}</span><strong>{latest.device} · {latest.host || latest.destinationIP}</strong><small>{bytes(latest.traffic)} · {anomalyDecision(latest.decision)}</small></> : <strong>尚未发现高流量连接</strong>}</div>
     {canManage && <button className="anomaly-settings-button" onClick={onEdit}><SlidersHorizontal />设置</button>}
@@ -159,10 +159,10 @@ function AnomalySettingsModal({ editor, setEditor, onSave }) {
   return <div className="modal-backdrop" onMouseDown={()=>setEditor(null)}><form className="user-modal anomaly-modal" onMouseDown={event=>event.stopPropagation()} onSubmit={event=>{event.preventDefault();onSave(editor);}}>
     <div className="modal-heading"><div><span className="eyebrow">异常守卫</span><h3>高流量自动处置</h3></div><button type="button" onClick={()=>setEditor(null)}>×</button></div>
     <div className="anomaly-switches"><label><span><strong>启用异常检测</strong></span><input type="checkbox" checked={editor.enabled} onChange={event=>setEditor({...editor,enabled:event.target.checked})}/></label><label><span><strong>允许自动执行</strong></span><input type="checkbox" checked={editor.autonomous} onChange={event=>setEditor({...editor,autonomous:event.target.checked})}/></label></div>
-    <div className="modal-fields"><label>单连接阈值（GiB）<input type="number" min="0.1" max="10240" step="0.1" value={editor.thresholdGiB} onChange={event=>setEditor({...editor,thresholdGiB:Number(event.target.value)})}/></label><label>决策方式<select value={editor.actionPolicy} onChange={event=>setEditor({...editor,actionPolicy:event.target.value})}><option value="ai">由 AI 判断</option><option value="alert">仅提醒</option><option value="direct">改走直连</option><option value="block">阻断目标</option></select></label></div>
+    <div className="modal-fields"><label>同目标 5 分钟累计阈值（GiB）<input type="number" min="0.1" max="10240" step="0.1" value={editor.thresholdGiB} onChange={event=>setEditor({...editor,thresholdGiB:Number(event.target.value)})}/></label><label>决策方式<select value={editor.actionPolicy} onChange={event=>setEditor({...editor,actionPolicy:event.target.value})}><option value="ai">由 AI 判断</option><option value="alert">仅提醒</option><option value="direct">改走直连</option><option value="block">阻断目标</option></select></label></div>
     <label>同一目标冷却期（分钟）<input type="number" min="5" max="10080" value={editor.cooldownMinutes} onChange={event=>setEditor({...editor,cooldownMinutes:Number(event.target.value)})}/></label>
     <label>保护目标<input value={editor.protectedText} onChange={event=>setEditor({...editor,protectedText:event.target.value})} placeholder="router.local, example.internal"/><small>内网、回环和链路本地地址始终受到保护；此处可追加域名或 IP。</small></label>
-    {editor.autonomous && <div className="anomaly-warning"><WarningCircle/>AI 只能在阻断、改走直连、仅提醒中选择；后端验证目标后只终止当前连接。</div>}
+    {editor.autonomous && <div className="anomaly-warning"><WarningCircle/>AI 只能在阻断、改走直连、仅提醒中选择；执行时终止该设备到同一目标的全部活动连接。</div>}
     {editor.error && <div className="inline-message is-error">{editor.error}</div>}
     <button className="primary-button modal-submit" disabled={editor.busy}>{editor.busy?"正在保存":"保存守卫策略"}</button>
   </form></div>;

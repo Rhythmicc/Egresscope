@@ -4,6 +4,7 @@ import ipaddress
 import json
 import sqlite3
 import time
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Callable, ContextManager
 
@@ -15,12 +16,53 @@ from .subscription_ai import AISettingsStore, parse_ai_suggestion
 DatabaseFactory = Callable[[], ContextManager[sqlite3.Connection]]
 
 DEFAULT_THRESHOLD_BYTES = 5 * 1024**3
+DEFAULT_WINDOW_SECONDS = 5 * 60
 DEFAULT_PROTECTED_TARGETS = [
     "localhost",
     "router.local",
 ]
 VALID_ACTIONS = {"ai", "block", "direct", "alert"}
 VALID_DECISIONS = {"block", "direct", "alert"}
+
+
+def normalized_target(host: str, destination_ip: str) -> str:
+    return str(host or destination_ip or "").strip().lower().rstrip(".")
+
+
+class TargetTrafficWindow:
+    """Rolling byte totals keyed by device and normalized destination target."""
+
+    def __init__(self) -> None:
+        self._samples: dict[tuple[str, str], deque[tuple[int, int, int]]] = defaultdict(deque)
+
+    def record(self, timestamp: int, source_ip: str, target: str, upload: int, download: int) -> None:
+        key = (str(source_ip), normalized_target(target, ""))
+        if not key[1] or (upload <= 0 and download <= 0):
+            return
+        self._samples[key].append((int(timestamp), max(0, int(upload)), max(0, int(download))))
+
+    def usage(self, source_ip: str, target: str, now: int, window_seconds: int = DEFAULT_WINDOW_SECONDS) -> dict[str, int]:
+        key = (str(source_ip), normalized_target(target, ""))
+        samples = self._samples.get(key)
+        if not samples:
+            return {"upload": 0, "download": 0, "traffic": 0}
+        cutoff = int(now) - max(1, int(window_seconds))
+        while samples and samples[0][0] < cutoff:
+            samples.popleft()
+        if not samples:
+            self._samples.pop(key, None)
+            return {"upload": 0, "download": 0, "traffic": 0}
+        upload = sum(item[1] for item in samples)
+        download = sum(item[2] for item in samples)
+        return {"upload": upload, "download": download, "traffic": upload + download}
+
+    def prune(self, now: int, window_seconds: int = DEFAULT_WINDOW_SECONDS) -> None:
+        cutoff = int(now) - max(1, int(window_seconds))
+        for key, samples in list(self._samples.items()):
+            while samples and samples[0][0] < cutoff:
+                samples.popleft()
+            if not samples:
+                self._samples.pop(key, None)
 
 
 def _normalized_targets(values: list[str] | None) -> list[str]:
@@ -79,6 +121,7 @@ class TrafficAnomalyStore:
                 "enabled": True,
                 "autonomous": False,
                 "thresholdBytes": DEFAULT_THRESHOLD_BYTES,
+                "windowSeconds": DEFAULT_WINDOW_SECONDS,
                 "actionPolicy": "ai",
                 "cooldownSeconds": 3600,
                 "protectedTargets": DEFAULT_PROTECTED_TARGETS,
@@ -92,6 +135,7 @@ class TrafficAnomalyStore:
             "enabled": bool(row["enabled"]),
             "autonomous": bool(row["autonomous"]),
             "thresholdBytes": int(row["threshold_bytes"]),
+            "windowSeconds": DEFAULT_WINDOW_SECONDS,
             "actionPolicy": str(row["action_policy"]),
             "cooldownSeconds": int(row["cooldown_seconds"]),
             "protectedTargets": _normalized_targets(targets),
@@ -103,7 +147,7 @@ class TrafficAnomalyStore:
         merged = {**current, **payload}
         threshold = int(merged["thresholdBytes"])
         if threshold < 100 * 1024**2 or threshold > 10 * 1024**4:
-            raise ValueError("单连接阈值必须在 100 MiB 到 10 TiB 之间")
+            raise ValueError("同目标流量阈值必须在 100 MiB 到 10 TiB 之间")
         action_policy = str(merged["actionPolicy"])
         if action_policy not in VALID_ACTIONS:
             raise ValueError("不支持的异常处置策略")
@@ -139,11 +183,32 @@ class TrafficAnomalyStore:
             )
         return self.get_settings()
 
-    def reserve(self, connection: dict[str, Any], threshold_bytes: int) -> int | None:
-        event_key = f"{connection.get('id')}:{threshold_bytes}"
+    def reserve(
+        self,
+        connection: dict[str, Any],
+        threshold_bytes: int,
+        window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    ) -> int | None:
         now = int(time.time())
+        source_ip = str(connection.get("sourceIP") or "")
+        host = normalized_target(str(connection.get("host") or ""), "")
+        destination_ip = str(connection.get("destinationIP") or "")
+        target = normalized_target(host, destination_ip)
+        event_key = str(connection.get("anomalyKey") or f"{source_ip}:{target}:{now // max(1, window_seconds)}:{threshold_bytes}")
         try:
             with self._database() as database:
+                target_column = "host" if host else "destination_ip"
+                target_value = host if host else destination_ip
+                existing = database.execute(
+                    f"""
+                    SELECT 1 FROM traffic_anomaly_actions
+                    WHERE source_ip = ? AND {target_column} = ? AND created_at >= ?
+                    LIMIT 1
+                    """,
+                    (source_ip, target_value, now - max(1, int(window_seconds))),
+                ).fetchone()
+                if existing:
+                    return None
                 cursor = database.execute(
                     """
                     INSERT INTO traffic_anomaly_actions(
@@ -155,10 +220,10 @@ class TrafficAnomalyStore:
                         event_key,
                         str(connection.get("id") or ""),
                         str(connection.get("device") or ""),
-                        str(connection.get("sourceIP") or ""),
-                        str(connection.get("host") or ""),
-                        str(connection.get("destinationIP") or ""),
-                        int(connection.get("upload") or 0) + int(connection.get("download") or 0),
+                        source_ip,
+                        host,
+                        destination_ip,
+                        int(connection.get("windowTraffic") or 0),
                         str(connection.get("route") or "proxy"),
                         str(connection.get("rule") or ""),
                         str(connection.get("policy") or ""),
@@ -191,14 +256,16 @@ class TrafficAnomalyStore:
             )
 
     def recent_target_action(self, host: str, destination_ip: str, since: int) -> bool:
+        target_column = "host" if host else "destination_ip"
+        target_value = host if host else destination_ip
         with self._database() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT 1 FROM traffic_anomaly_actions
-                WHERE created_at >= ? AND status = 'executed' AND (host = ? OR destination_ip = ?)
+                WHERE created_at >= ? AND status = 'executed' AND {target_column} = ?
                 LIMIT 1
                 """,
-                (since, host, destination_ip),
+                (since, target_value),
             ).fetchone()
         return bool(row)
 
@@ -257,9 +324,10 @@ class TrafficAnomalyAnalyzer:
             "targetHost": str(connection.get("host") or "")[:253],
             "destinationIP": str(connection.get("destinationIP") or "")[:80],
             "service": str(connection.get("service") or "")[:120],
-            "trafficBytes": int(connection.get("upload") or 0) + int(connection.get("download") or 0),
-            "uploadBytes": int(connection.get("upload") or 0),
-            "downloadBytes": int(connection.get("download") or 0),
+            "windowSeconds": int(connection.get("windowSeconds") or DEFAULT_WINDOW_SECONDS),
+            "trafficBytes": int(connection.get("windowTraffic") or 0),
+            "uploadBytes": int(connection.get("windowUpload") or 0),
+            "downloadBytes": int(connection.get("windowDownload") or 0),
             "matchedRule": str(connection.get("rule") or "")[:200],
             "policy": str(connection.get("policy") or "")[:200],
         }
