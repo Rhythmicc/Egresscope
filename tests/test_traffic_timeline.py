@@ -31,6 +31,30 @@ class TrafficTimelineTests(unittest.TestCase):
         self.assertTrue(flow["links"])
         self.assertTrue(all(link["value"] == 2000 for link in flow["links"]))
 
+    def test_device_flow_is_acyclic_when_rule_and_policy_names_repeat(self):
+        rows = [
+            {
+                "rule": "国外媒体",
+                "chain": '["国外媒体","节点选择","美国","美国最佳","国外媒体"]',
+                "up": 98_000_000,
+                "down": 588_994,
+            },
+            {
+                "rule": "微软服务",
+                "chain": '["微软服务","节点选择","美国","美国最佳","美国节点 01"]',
+                "up": 14_101,
+                "down": 0,
+            },
+        ]
+        flow = _usage_flow("ssslab-login-1", rows)
+
+        self.assertFalse(any(link["source"] == link["target"] for link in flow["links"]))
+        self.assertFalse(any(
+            flow["nodes"][link["source"]]["stage"] >= flow["nodes"][link["target"]]["stage"]
+            for link in flow["links"]
+        ))
+        self.assertEqual(sum(node["name"] == "国外媒体" for node in flow["nodes"]), 2)
+
     def test_exit_usage_counts_only_the_deepest_policy(self):
         rows = [
             {"chain": '["节点选择","美国","美国最佳","美国节点 01"]', "total": 700},

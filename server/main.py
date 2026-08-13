@@ -2790,13 +2790,25 @@ async def strategy_payload() -> dict[str, Any]:
 
 def _usage_flow(device_name: str, rows: list[Any]) -> dict[str, Any]:
     """Build a Sankey from accumulated bytes, never from an average or instantaneous rate."""
-    node_indexes: dict[str, int] = {}
+    # Recharts' Sankey implementation only accepts directed acyclic graphs. A
+    # rule and the first item in mihomo's proxy chain often share the same
+    # display name (for example ``国外媒体 -> 国外媒体``). Using the display name
+    # as the node identity therefore created self-links and crashed the whole
+    # device page while Recharts recursively calculated node depths.
+    #
+    # Keep labels user-friendly, but scope the internal identity to its stage
+    # in the path. Every edge then advances exactly one stage, so the graph is
+    # acyclic even when a label appears again later in a nested policy chain.
+    node_indexes: dict[tuple[int, str], int] = {}
+    nodes: list[dict[str, Any]] = []
     links: dict[tuple[int, int], int] = defaultdict(int)
 
-    def node(name: str) -> int:
-        if name not in node_indexes:
-            node_indexes[name] = len(node_indexes)
-        return node_indexes[name]
+    def node(stage: int, name: str) -> int:
+        key = (stage, name)
+        if key not in node_indexes:
+            node_indexes[key] = len(nodes)
+            nodes.append({"name": name, "stage": stage})
+        return node_indexes[key]
 
     for row in rows:
         try:
@@ -2805,17 +2817,20 @@ def _usage_flow(device_name: str, rows: list[Any]) -> dict[str, Any]:
             chain = [str(row["chain"])]
         if not isinstance(chain, list) or not chain:
             chain = ["DIRECT"]
-        path = [device_name, str(row["rule"]), *[str(item) for item in chain]]
+        raw_path = [device_name, str(row["rule"] or "未命名规则"), *[str(item or "未知策略") for item in chain]]
+        path: list[str] = []
+        for label in raw_path:
+            # Adjacent duplicates do not carry additional routing information
+            # and make the rendered path needlessly confusing.
+            if not path or path[-1] != label:
+                path.append(label)
         value = int(row["up"] or 0) + int(row["down"] or 0)
         if value <= 0:
             continue
-        for left, right in zip(path, path[1:]):
-            links[(node(left), node(right))] += value
+        for stage, (left, right) in enumerate(zip(path, path[1:])):
+            links[(node(stage, left), node(stage + 1, right))] += value
     if not links:
-        links[(node(device_name), node("暂无流量记录"))] = 1
-    nodes = [None] * len(node_indexes)
-    for name, index in node_indexes.items():
-        nodes[index] = {"name": name}
+        links[(node(0, device_name), node(1, "暂无流量记录"))] = 1
     return {"nodes": nodes, "links": [{"source": source, "target": target, "value": value} for (source, target), value in links.items()], "empty": not rows}
 
 

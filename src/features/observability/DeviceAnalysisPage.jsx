@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Component, useEffect, useState } from "react";
 import {
   ArrowClockwise,
   CaretDown,
@@ -20,6 +20,27 @@ import { api } from "../../api";
 import { demoDevice } from "../../demo-data";
 import { bucketDuration, bytes, rate } from "../../lib/formatters";
 import { DASHBOARD_RANGES, TrafficChart } from "./DashboardPage";
+
+class FlowChartBoundary extends Component {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidUpdate(previousProps) {
+    if (this.state.failed && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ failed: false });
+    }
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <div className="flow-chart-fallback"><WarningCircle weight="fill" /><strong>流量路径暂时无法绘制</strong><span>其他设备统计仍可正常查看，请稍后刷新。</span></div>;
+    }
+    return this.props.children;
+  }
+}
 
 function FlowNode({ x, y, width, height, index, payload, containerWidth }) {
   const source = x < containerWidth * 0.18;
@@ -74,11 +95,13 @@ export function DeviceFlow({ device, onBack }) {
         <div className="flow-panel-title"><h3>{rangeCopy}累计流量路径</h3><div className="flow-total">累计流量 <strong>{bytes(summary.traffic)}</strong></div></div>
         <div className="flow-column-labels"><span>来源设备</span><span>命中规则</span><span>策略组</span><span>出口节点</span></div>
         <div className="sankey-wrap">
-          <ResponsiveContainer width="100%" height="100%">
-            <Sankey data={flow} node={<FlowNode />} nodePadding={28} nodeWidth={8} link={{ stroke: "#4f8df7", strokeOpacity: 0.22 }} margin={{ top: 12, right: 110, bottom: 12, left: 110 }}>
-              <Tooltip formatter={(v) => bytes(v)} contentStyle={{ background: "#172033", border: "1px solid #2c3850", borderRadius: 8, color: "#eef4ff" }} />
-            </Sankey>
-          </ResponsiveContainer>
+          <FlowChartBoundary resetKey={flow}>
+            <ResponsiveContainer width="100%" height="100%">
+              <Sankey data={flow} node={<FlowNode />} nodePadding={28} nodeWidth={8} link={{ stroke: "#4f8df7", strokeOpacity: 0.22 }} margin={{ top: 12, right: 110, bottom: 12, left: 110 }}>
+                <Tooltip formatter={(v) => bytes(v)} contentStyle={{ background: "#172033", border: "1px solid #2c3850", borderRadius: 8, color: "#eef4ff" }} />
+              </Sankey>
+            </ResponsiveContainer>
+          </FlowChartBoundary>
         </div>
       </section>
       <div className="analysis-bottom-grid">
