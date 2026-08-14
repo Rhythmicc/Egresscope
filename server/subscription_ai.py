@@ -19,6 +19,10 @@ DEFAULT_FILTER: dict[str, Any] = {
     "renameRules": [],
 }
 
+MAX_NODE_NAME_LENGTH = 256
+MAX_FILTER_PATTERN_LENGTH = 240
+MAX_FILTER_REPEATS = 16
+
 PROVIDERS = {
     "deepseek": {
         "label": "DeepSeek",
@@ -95,16 +99,54 @@ def parse_ai_suggestion(content: Any) -> dict[str, Any]:
     return decoded
 
 
+def _validate_filter_tokens(tokens: Any, field: str, *, inside_repeat: bool = False, budget: list[int] | None = None) -> None:
+    """Accept a deliberately small, predictable subset of Python regex.
+
+    Python's backtracking engine has no cancellable per-match timeout. Merely
+    moving a match to a worker thread would leave a malicious expression
+    running after an asyncio timeout. Instead, reject constructs that can make
+    repetition ambiguous or recursively backtrack. Normal filters such as
+    ``香港|美国``, ``.*家宽`` and ``\\s*特区\\s*`` remain supported.
+    """
+    work = budget if budget is not None else [0]
+    previous_repeat = False
+    for operation, argument in tokens:
+        name = str(operation)
+        if name in {"MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"}:
+            work[0] += 1
+            if work[0] > MAX_FILTER_REPEATS or previous_repeat or inside_repeat:
+                raise ValueError(f"{field} 包含不安全或代价过高的正则结构")
+            _, _, child = argument
+            if tuple(child.getwidth()) != (1, 1):
+                raise ValueError(f"{field} 包含不安全或代价过高的正则结构")
+            _validate_filter_tokens(child, field, inside_repeat=True, budget=work)
+            previous_repeat = True
+            continue
+        if name == "SUBPATTERN":
+            _validate_filter_tokens(argument[-1], field, inside_repeat=inside_repeat, budget=work)
+        elif name == "BRANCH":
+            if inside_repeat or len(argument[1]) > 32:
+                raise ValueError(f"{field} 包含不安全或代价过高的正则结构")
+            for branch in argument[1]:
+                _validate_filter_tokens(branch, field, inside_repeat=False, budget=work)
+        elif name.startswith("GROUPREF") or name in {"ASSERT", "ASSERT_NOT", "ATOMIC_GROUP"}:
+            raise ValueError(f"{field} 包含不安全或代价过高的正则结构")
+        elif name not in {"LITERAL", "NOT_LITERAL", "ANY", "IN", "CATEGORY", "AT"}:
+            raise ValueError(f"{field} 包含不支持的正则结构")
+        if name != "AT":
+            previous_repeat = False
+
+
 def _compiled_filter(pattern: str, field: str) -> re.Pattern[str] | None:
     value = pattern.strip()
     if not value:
         return None
-    if len(value) > 240:
-        raise ValueError(f"{field} 最多 240 个字符")
-    if re.search(r"\\[1-9]|\(\?<([=!])|\([^)]*[+*][^)]*\)[+*{]", value):
-        raise ValueError(f"{field} 包含不安全或代价过高的正则结构")
+    if len(value) > MAX_FILTER_PATTERN_LENGTH:
+        raise ValueError(f"{field} 最多 {MAX_FILTER_PATTERN_LENGTH} 个字符")
     try:
-        return re.compile(value, re.IGNORECASE)
+        compiled = re.compile(value, re.IGNORECASE)
+        _validate_filter_tokens(re._parser.parse(value, re.IGNORECASE), field)
+        return compiled
     except re.error as exc:
         raise ValueError(f"{field} 不是有效正则：{exc}") from exc
 
@@ -166,6 +208,9 @@ def apply_node_filter(
     used_names: dict[str, int] = {}
     for raw in nodes:
         original_name = str(raw.get("name") or "").strip()
+        if len(original_name) > MAX_NODE_NAME_LENGTH:
+            excluded_names.append(f"{original_name[:80]}…")
+            continue
         folded = original_name.casefold()
         if include and not include.search(original_name):
             excluded_names.append(original_name)

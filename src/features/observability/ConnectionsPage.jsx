@@ -167,6 +167,14 @@ const demoConnectionStatistics = (data, status) => {
   return { range: "24h", status, retentionDays: 30, summary: { active: active.length, history: history.length, total: everySession.length, devices: new Set(everySession.map(item => item.sourceIP)).size, traffic: everySession.reduce((sum, item) => sum + item.upload + item.download, 0), matched: all.length }, sessions: all };
 };
 
+const emptyConnectionStatistics = (range = "24h", status = "active") => ({
+  range,
+  status,
+  retentionDays: 30,
+  summary: { active: 0, history: 0, total: 0, devices: 0, traffic: 0, matched: 0 },
+  sessions: [],
+});
+
 export function ConnectionsPage({ data, onDevice, canManage }) {
   const [query, setQuery] = useState("");
   const [deviceFilter, setDeviceFilter] = useState("");
@@ -180,7 +188,7 @@ export function ConnectionsPage({ data, onDevice, canManage }) {
   const [contextMenu, setContextMenu] = useState(null);
   const [inspected, setInspected] = useState(null);
   const [quickRule, setQuickRule] = useState(null);
-  const [statistics, setStatistics] = useState(() => demoConnectionStatistics(data, "active"));
+  const [statistics, setStatistics] = useState(() => emptyConnectionStatistics());
   const [loading, setLoading] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => {

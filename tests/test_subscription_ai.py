@@ -44,6 +44,25 @@ class SubscriptionFilterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不安全"):
             normalize_filter({"excludeRegex": "(a+)+"})
 
+    def test_rejects_ambiguous_repeated_alternation(self):
+        for pattern in ("(a|aa)+$", "(?:ab|a)+$", "(a*)+$", "a*a*a*b"):
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(ValueError, "不安全"):
+                normalize_filter({"excludeRegex": pattern})
+
+    def test_keeps_common_linear_filter_patterns(self):
+        for pattern in (r"香港|美国|日本", r".*家宽", r"\s*特区\s*"):
+            with self.subTest(pattern=pattern):
+                self.assertEqual(normalize_filter({"excludeRegex": pattern})["excludeRegex"], pattern)
+
+    def test_excludes_oversized_legacy_node_names_before_matching(self):
+        filtered, preview = apply_node_filter(
+            [*self.nodes, {"name": "a" * 512, "type": "ss"}],
+            {"excludeRegex": "a+$"},
+            allow_empty=True,
+        )
+        self.assertEqual(len(filtered), len(self.nodes))
+        self.assertEqual(preview["excluded"], 1)
+
 
 class AISettingsStoreTests(unittest.TestCase):
     def test_api_key_is_never_returned_by_public_settings(self):

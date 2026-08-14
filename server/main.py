@@ -52,6 +52,7 @@ from .schemas import (
 )
 from .subscription_ai import (
     AISettingsStore,
+    MAX_NODE_NAME_LENGTH,
     SubscriptionAIAnalyzer,
     apply_node_filter,
     normalize_filter,
@@ -451,6 +452,10 @@ def _normalize_subscription_nodes(nodes: Any) -> list[dict[str, Any]]:
         name = str(node.get("name") or "").strip()
         proxy_type = str(node.get("type") or "").lower().strip()
         server = str(node.get("server") or "").strip()
+        if len(name) > MAX_NODE_NAME_LENGTH:
+            raise ValueError(f"节点名称最多允许 {MAX_NODE_NAME_LENGTH} 个字符")
+        if any(ord(character) < 32 or ord(character) == 127 or character in "\u2028\u2029" for character in name + server):
+            raise ValueError("节点名称和服务器地址不能包含控制字符")
         try:
             port = int(node.get("port") or 0)
         except (TypeError, ValueError):
@@ -710,7 +715,26 @@ def _clash_delivery(name: str, nodes: list[dict[str, Any]]) -> str:
 
 
 def _surge_scalar(value: Any) -> str:
-    return str(value).replace("\\", "\\\\").replace(",", "\\,")
+    escaped: list[str] = []
+    for character in str(value):
+        codepoint = ord(character)
+        if character == "\\":
+            escaped.append("\\\\")
+        elif character == ",":
+            escaped.append("\\,")
+        elif character == "\r":
+            escaped.append("\\r")
+        elif character == "\n":
+            escaped.append("\\n")
+        elif character == "\t":
+            escaped.append("\\t")
+        elif codepoint < 32 or codepoint == 127:
+            escaped.append(f"\\x{codepoint:02x}")
+        elif character in "\u2028\u2029":
+            escaped.append(f"\\u{codepoint:04x}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
 
 
 def _surge_node_line(node: dict[str, Any]) -> str | None:

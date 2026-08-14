@@ -1,14 +1,9 @@
 import { Component, useEffect, useState } from "react";
 import {
-  ArrowClockwise,
   CaretDown,
-  CheckCircle,
-  DownloadSimple,
   Funnel,
   GlobeHemisphereEast,
   Pulse,
-  Rows,
-  ShieldCheck,
   WarningCircle,
 } from "@phosphor-icons/react";
 import {
@@ -113,11 +108,6 @@ export function DeviceFlow({ device, onBack }) {
           <div className="dark-panel-heading"><div><h3>请求目标与流量</h3></div><GlobeHemisphereEast /></div>
           <div className="destination-trace-head"><span>目标主机</span><span>上传</span><span>下载</span><span>累计</span></div>
           <div className="destination-trace-list">{(current.destinations || []).map((item) => <div className="destination-trace-row" key={item.host}><span><strong>{item.host}</strong><small>{item.rule || item.service}</small></span><b>{bytes(item.up || 0)}</b><b>{bytes(item.down || 0)}</b><b>{bytes(item.traffic ?? ((item.up || 0) + (item.down || 0)))}</b></div>)}</div>
-        </section>
-        <section className="dark-panel anomaly-panel">
-          <div className="dark-panel-heading"><div><h3>审计提示</h3><p>{live ? "最近 24 小时" : rangeCopy}</p></div><ShieldCheck /></div>
-          <div className="anomaly-item"><WarningCircle weight="fill" /><div><strong>发现 1 次链路切换</strong><p>美国最佳延迟升高，自动切至 us-lax-03。</p><small>18 分钟前</small></div></div>
-          <div className="audit-ok"><CheckCircle weight="fill" /> 未发现异常目标或突发外联</div>
         </section>
       </div>
     </div>

@@ -12,6 +12,7 @@ from server.main import (
     _parse_subscription,
     _subscription_usage,
     _surge_delivery,
+    _surge_scalar,
 )
 
 
@@ -44,6 +45,14 @@ proxies:
         source_format, nodes = _parse_subscription(source)
         self.assertEqual(source_format, "mihomo")
         self.assertEqual(nodes[0]["name"], "Tokyo")
+
+    def test_rejects_oversized_or_control_character_node_identity(self):
+        oversized = yaml.safe_dump({"proxies": [{"name": "a" * 257, "type": "ss", "server": "example.com", "port": 443}]}, allow_unicode=True).encode()
+        with self.assertRaisesRegex(ValueError, "节点名称最多"):
+            _parse_subscription(oversized)
+        controlled = yaml.safe_dump({"proxies": [{"name": "safe\nFINAL,DIRECT", "type": "ss", "server": "example.com", "port": 443}]}, allow_unicode=True).encode()
+        with self.assertRaisesRegex(ValueError, "控制字符"):
+            _parse_subscription(controlled)
 
     def test_replaces_node_inventory_without_changing_group_topology(self):
         config = {
@@ -108,6 +117,15 @@ proxies:
         self.assertNotIn("[Script]", profile)
         self.assertNotIn("[Host]", profile)
         self.assertTrue(profile.rstrip().endswith("FINAL,🐟 漏网之鱼"))
+
+    def test_surge_scalar_never_emits_line_or_control_characters(self):
+        self.assertEqual(_surge_scalar("node,\r\n\t\x00end"), r"node\,\r\n\t\x00end")
+        profile = _surge_delivery(
+            "Example",
+            [{"name": "Safe\nFINAL,DIRECT", "type": "ss", "server": "example.com", "port": 443, "cipher": "aes-128-gcm", "password": "secret\n[Host]"}],
+        )
+        self.assertNotIn("\nFINAL,DIRECT", profile)
+        self.assertNotIn("\n[Host]\n", profile)
 
     def test_delivery_rules_fall_back_when_region_is_missing(self):
         nodes = [{"name": "🇺🇸 US A", "type": "ss", "server": "us.example.com", "port": 443, "cipher": "aes-128-gcm", "password": "secret"}]
