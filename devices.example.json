@@ -1,5 +1,5 @@
 {
-  "192.168.31.190": "nas-storage",
-  "192.168.31.28": "macbook-lian",
-  "192.168.31.46": "tv-livingroom"
+  "192.168.1.10": "nas-storage",
+  "192.168.1.20": "workstation",
+  "192.168.1.30": "tv-livingroom"
 }

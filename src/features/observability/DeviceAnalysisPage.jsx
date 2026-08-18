@@ -12,8 +12,7 @@ import {
   Tooltip,
 } from "recharts";
 import { api } from "../../api";
-import { demoDevice } from "../../demo-data";
-import { bucketDuration, bytes, rate } from "../../lib/formatters";
+import { bytes, rate } from "../../lib/formatters";
 import { DASHBOARD_RANGES, TrafficChart } from "./DashboardPage";
 
 class FlowChartBoundary extends Component {
@@ -73,7 +72,6 @@ export function DeviceFlow({ device, onBack }) {
   const rangeLabel = DASHBOARD_RANGES.find(([key]) => key === range)?.[1] || "实时";
   const live = range === "live";
   const rangeCopy = live ? "最近 15 分钟" : range === "month" ? "本月" : `最近 ${rangeLabel}`;
-  const bucketCopy = bucketDuration(current.timelineBucketSeconds || 0);
   return (
     <div className="device-analysis page-content dark-workspace">
       <div className="device-analysis-header">
@@ -101,7 +99,7 @@ export function DeviceFlow({ device, onBack }) {
       </section>
       <div className="analysis-bottom-grid">
         <section className="dark-panel device-traffic-panel">
-          <div className="dark-panel-heading"><div><h3>设备流量趋势</h3><p>{rangeCopy} · 每 {bucketCopy} 实际消耗流量</p></div><Pulse /></div>
+          <div className="dark-panel-heading"><div><h3>设备流量趋势</h3></div><Pulse /></div>
           <div className="device-chart"><TrafficChart data={current.timeline || []} compact /></div>
         </section>
         <section className="dark-panel destinations-panel">

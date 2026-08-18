@@ -15,8 +15,8 @@ import {
   WarningCircle,
   X,
 } from "@phosphor-icons/react";
-import { api, subscribeLive } from "../../api";
-import { demoDashboard } from "../../demo-data";
+import { api } from "../../api";
+import { connectionExitNode } from "../../lib/connections";
 import { bytes, connectionDuration, connectionTime, rate } from "../../lib/formatters";
 
 const DEMO_MODE = import.meta.env.DEV || import.meta.env.VITE_DEMO_MODE === "true";
@@ -41,7 +41,7 @@ function ConnectionTable({ connections, onDevice, onSelect, onContext, dense = f
   return (
     <div className={`connection-table-wrap ${dense ? "dense" : ""} ${operational ? "operational" : ""}`} data-testid={operational ? "connections-scroll" : undefined}>
       <table className="connection-table">
-        <thead><tr><th>设备</th><th>目标</th><th>协议</th><th>命中规则</th><th>策略链路</th><th className="numeric">上行速率</th><th className="numeric">下行速率</th><th className="numeric">累计流量</th><th>持续时间</th></tr></thead>
+        <thead><tr><th>设备</th><th>目标</th><th>协议</th><th>命中规则</th><th>出口节点</th><th className="numeric">上行速率</th><th className="numeric">下行速率</th><th className="numeric">累计流量</th><th>持续时间</th></tr></thead>
         <tbody>
           {connections.map((connection) => { const protocol = connectionProtocol(connection); const moving = connection.upRate + connection.downRate > 0; return (
             <tr key={connection.id} className={moving ? "is-moving" : "is-idle"} onClick={() => onSelect ? onSelect(connection) : onDevice?.({ name: connection.device, ip: connection.sourceIP })} onContextMenu={(event) => { if (!onContext) return; event.preventDefault(); onContext(event, connection); }}>
@@ -49,7 +49,7 @@ function ConnectionTable({ connections, onDevice, onSelect, onContext, dense = f
               <td><strong>{connection.host || connection.destinationIP}</strong><small>{connection.destinationIP}:{connection.destinationPort}</small></td>
               <td><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></td>
               <td><RuleMatch connection={connection} /></td>
-              <td><div className="chain-text">{connection.chain.map((item, i) => <span key={`${item}-${i}`}>{item}</span>)}</div></td>
+              <td><span className="connection-exit-node" title={connectionExitNode(connection)}>{connectionExitNode(connection)}</span></td>
               <td className="numeric up">{rate(connection.upRate)}</td>
               <td className="numeric down">{rate(connection.downRate)}</td>
               <td className="numeric cumulative">{bytes((connection.upload || 0) + (connection.download || 0))}</td>
@@ -62,45 +62,45 @@ function ConnectionTable({ connections, onDevice, onSelect, onContext, dense = f
   );
 }
 
-function ConnectionStatisticsTable({ connections, onSelect, onContext, dense = false }) {
+function ConnectionStatisticsTable({ connections, onSelect, onContext, dense = false, showStatus = true }) {
   return <div className={`connection-table-wrap operational statistics-table-wrap ${dense ? "dense" : ""}`} data-testid="connections-scroll">
-    <table className="connection-table statistics-table">
-      <thead><tr><th>状态</th><th>设备</th><th>目标</th><th>协议</th><th>命中规则</th><th>策略链路</th><th className="numeric">上传</th><th className="numeric">下载</th><th className="numeric">总流量</th><th>连接时间</th></tr></thead>
+    <table className={`connection-table statistics-table ${showStatus ? "has-status" : "without-status"}`}>
+      <thead><tr>{showStatus && <th className="column-status">状态</th>}<th className="column-device">设备</th><th className="column-target">目标</th><th className="column-protocol">协议</th><th className="column-rule">命中规则</th><th className="column-exit">出口节点</th><th className="numeric column-upload">上传</th><th className="numeric column-download">下载</th><th className="numeric column-total">总流量</th><th className="column-time">连接时间</th></tr></thead>
       <tbody>{connections.length ? connections.map(connection => {
         const protocol = connectionProtocol(connection);
         const active = connection.status === "active";
         return <tr key={connection.id} className={active ? "is-moving" : "is-ended"} onClick={() => onSelect?.(connection)} onContextMenu={event => { event.preventDefault(); onContext?.(event, connection); }}>
-          <td><span className={`connection-status ${active ? "active" : "ended"}`}><i />{active ? "活跃" : "已结束"}</span></td>
-          <td><span className="connection-device"><span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></span></td>
-          <td><strong>{connection.host || connection.destinationIP}</strong><small>{connection.destinationIP}:{connection.destinationPort}</small></td>
-          <td><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></td>
-          <td><RuleMatch connection={connection} /></td>
-          <td><div className="chain-text">{connection.chain.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}</div></td>
-          <td className="numeric up">{bytes(connection.upload)}</td>
-          <td className="numeric down">{bytes(connection.download)}</td>
-          <td className="numeric cumulative">{bytes((connection.upload || 0) + (connection.download || 0))}</td>
-          <td><strong>{connectionTime(connection.startedAt)}</strong><small>{active ? connectionDuration(connection.durationSeconds) : `结束 ${connectionTime(connection.endedAt)}`}</small></td>
+          {showStatus && <td className="column-status"><span className={`connection-status ${active ? "active" : "ended"}`}><i />{active ? "活跃" : "已结束"}</span></td>}
+          <td className="column-device"><span className="connection-device"><span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></span></td>
+          <td className="column-target"><strong>{connection.host || connection.destinationIP}</strong><small>{connection.destinationIP}:{connection.destinationPort}</small></td>
+          <td className="column-protocol"><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></td>
+          <td className="column-rule"><RuleMatch connection={connection} /></td>
+          <td className="column-exit"><span className="connection-exit-node" title={connectionExitNode(connection)}>{connectionExitNode(connection)}</span></td>
+          <td className="numeric up column-upload">{bytes(connection.upload)}</td>
+          <td className="numeric down column-download">{bytes(connection.download)}</td>
+          <td className="numeric cumulative column-total">{bytes((connection.upload || 0) + (connection.download || 0))}</td>
+          <td className="column-time"><strong>{connectionTime(connection.startedAt)}</strong><small>{active ? connectionDuration(connection.durationSeconds) : `结束 ${connectionTime(connection.endedAt)}`}</small></td>
         </tr>;
-      }) : <tr className="connection-table-empty"><td colSpan="10">当前筛选条件下没有连接记录</td></tr>}</tbody>
+      }) : <tr className="connection-table-empty"><td colSpan={showStatus ? 10 : 9}>当前筛选条件下没有连接记录</td></tr>}</tbody>
     </table>
   </div>;
 }
 
-function ConnectionMobileList({ connections, onSelect, onContext }) {
+function ConnectionMobileList({ connections, onSelect, onContext, showStatus = true }) {
   return <div className="connection-mobile-list" data-testid="connections-mobile-list">
     {connections.length ? connections.map(connection => {
       const protocol = connectionProtocol(connection);
-      const active = connection.status === "active";
-      return <article className={`connection-mobile-card ${active ? "is-active" : "is-ended"}`} key={connection.id} onClick={() => onSelect?.(connection)}>
+        const active = connection.status === "active";
+        return <article className={`connection-mobile-card ${active ? "is-active" : "is-ended"}`} key={connection.id} onClick={() => onSelect?.(connection)}>
         <header>
-          <span className={`connection-status ${active ? "active" : "ended"}`}><i />{active ? "活跃" : "已结束"}</span>
+          {showStatus && <span className={`connection-status ${active ? "active" : "ended"}`}><i />{active ? "活跃" : "已结束"}</span>}
           <span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span>
           <button type="button" aria-label={`打开 ${connection.host || connection.destinationIP} 的连接操作`} onClick={event => { event.stopPropagation(); const box = event.currentTarget.getBoundingClientRect(); onContext?.({ clientX: box.right, clientY: box.bottom, preventDefault() {} }, connection); }}><DotsThreeVertical weight="bold" /></button>
         </header>
         <div className="connection-mobile-target"><strong>{connection.host || connection.destinationIP}</strong><span>{connection.destinationIP}:{connection.destinationPort}</span></div>
         <div className="connection-mobile-source"><Desktop /><span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></div>
         <div className="connection-mobile-rule"><span>命中规则</span><RuleMatch connection={connection} /></div>
-        <div className="connection-mobile-chain">{connection.chain.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}</div>
+        <div className="connection-mobile-exit"><small>出口节点</small><strong title={connectionExitNode(connection)}>{connectionExitNode(connection)}</strong></div>
         <footer><span><small>总流量</small><strong>{bytes((connection.upload || 0) + (connection.download || 0))}</strong></span><span><small>上传 / 下载</small><strong>{bytes(connection.upload)} / {bytes(connection.download)}</strong></span><span><small>{active ? "持续时间" : "结束时间"}</small><strong>{active ? connectionDuration(connection.durationSeconds) : connectionTime(connection.endedAt)}</strong></span></footer>
       </article>;
     }) : <div className="connection-mobile-empty">当前筛选条件下没有连接记录</div>}
@@ -202,7 +202,7 @@ export function ConnectionsPage({ data, onDevice, canManage }) {
       finally { if (mounted) setLoading(false); }
     };
     load();
-    timer = setInterval(load, mode === "active" ? 5000 : 15000);
+    if (!paused) timer = setInterval(load, mode === "active" ? 5000 : 15000);
     return () => { mounted = false; clearInterval(timer); };
   }, [range, mode, paused, refreshKey]);
   const source = paused ? snapshot : statistics.sessions || [];
@@ -265,14 +265,14 @@ export function ConnectionsPage({ data, onDevice, canManage }) {
           <select className="connection-range" value={range} onChange={event => setRange(event.target.value)}><option value="1h">最近 1 小时</option><option value="6h">最近 6 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option><option value="30d">最近 30 天</option></select>
           <select value={deviceFilter} onChange={event => setDeviceFilter(event.target.value)}><option value="">所有设备</option>{devices.map(device => <option key={device.ip} value={device.ip}>{device.name} · {device.ip}</option>)}</select>
           <select value={networkFilter} onChange={event => setNetworkFilter(event.target.value)}><option value="">所有协议</option><option value="HTTPS">HTTPS</option><option value="QUIC">QUIC</option><option value="TCP">TCP</option><option value="UDP">UDP</option></select>
-          <div className="search-box"><MagnifyingGlass /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索设备、目标、规则或策略链路" />{query && <button onClick={() => setQuery("")}><X /></button>}</div>
-          <button className={`toolbar-icon ${paused ? "active" : ""}`} title={paused ? "恢复自动刷新" : "暂停列表"} onClick={togglePause}>{paused ? <Pulse weight="fill" /> : <Pause weight="fill" />}</button>
-          <button className="toolbar-icon" title={compact ? "切换舒适密度" : "切换紧凑密度"} onClick={() => setCompact(current => !current)}>{compact ? <Rows /> : <CirclesFour />}</button>
+          <div className="search-box"><MagnifyingGlass /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索设备、目标、规则或出口节点" />{query && <button onClick={() => setQuery("")}><X /></button>}</div>
+          <button className={`toolbar-icon ${paused ? "active" : ""}`} aria-label={paused ? "恢复自动刷新" : "暂停列表"} title={paused ? "恢复自动刷新" : "暂停列表"} onClick={togglePause}>{paused ? <Pulse weight="fill" /> : <Pause weight="fill" />}</button>
+          <button className="toolbar-icon" aria-label={compact ? "切换舒适密度" : "切换紧凑密度"} title={compact ? "切换舒适密度" : "切换紧凑密度"} onClick={() => setCompact(current => !current)}>{compact ? <Rows /> : <CirclesFour />}</button>
           {canManage && mode !== "history" && <button className="danger-button" onClick={closeAll}>终止全部</button>}
         </div>
         {message && <div className="inline-message">{message}</div>}
-        <ConnectionStatisticsTable connections={filtered} onSelect={setInspected} onContext={openContextMenu} dense={compact} />
-        <ConnectionMobileList connections={filtered} onSelect={setInspected} onContext={openContextMenu} />
+        <ConnectionStatisticsTable connections={filtered} onSelect={setInspected} onContext={openContextMenu} dense={compact} showStatus={mode !== "active"} />
+        <ConnectionMobileList connections={filtered} onSelect={setInspected} onContext={openContextMenu} showStatus={mode !== "active"} />
         <div className="list-summary"><span className={paused ? "paused-dot" : "live-dot"} />{paused ? "已暂停" : loading ? "更新中" : mode === "active" ? "实时更新" : "历史记录"}<b>{filtered.length} / {statistics.summary?.matched || 0} 条连接</b>{mode === "active" && <><span>↑ {rate(data.totals.upRate)}</span><span>↓ {rate(data.totals.downRate)}</span></>}<small>Asia/Shanghai</small></div>
       </section>
       <ConnectionContextMenu state={contextMenu} canManage={canManage} onClose={() => setContextMenu(null)} onInspect={setInspected} onDevice={onDevice} onTerminate={closeOne} onAddRule={openQuickRule} />

@@ -8,6 +8,11 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=512)
 
 
+class ChangePasswordRequest(BaseModel):
+    currentPassword: str = Field(min_length=1, max_length=512)
+    newPassword: str = Field(min_length=12, max_length=512)
+
+
 class StrategySelectRequest(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     reconnect: bool = True
@@ -120,3 +125,10 @@ class CustomRuleUpdateRequest(BaseModel):
     placement: str | None = Field(default=None, pattern="^(before|after)$")
     note: str | None = Field(default=None, max_length=300)
     enabled: bool | None = None
+
+
+class GitHubSyncRequest(BaseModel):
+    repo: str = Field(default="", max_length=200)
+    branch: str = Field(default="", max_length=200)
+    path: str = Field(default="", max_length=500)
+    token: str | None = Field(default=None, min_length=1, max_length=512)

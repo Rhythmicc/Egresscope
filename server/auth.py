@@ -130,6 +130,22 @@ class AuthStore:
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return self.public_user(row)
 
+    def change_password(self, user_id: int, current_password: str, new_password: str) -> dict[str, Any]:
+        if len(new_password) < 12:
+            raise ValueError("新密码至少需要 12 个字符")
+        with self._database() as connection:
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row is None or not _password_matches(current_password, row["password_hash"]):
+                raise ValueError("当前密码不正确")
+            if _password_matches(new_password, row["password_hash"]):
+                raise ValueError("新密码不能与当前密码相同")
+            connection.execute(
+                "UPDATE users SET password_hash = ?, session_version = session_version + 1 WHERE id = ?",
+                (_password_hash(new_password), user_id),
+            )
+            updated = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return self.public_user(updated)
+
     @staticmethod
     def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         return {

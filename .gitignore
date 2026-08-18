@@ -14,5 +14,12 @@ runtime/
 *.sqlite*
 secrets/
 qa/
+design/
+design-qa*
+AGENTS.md
+QUALITY_REVIEW.md
+docs/internal/
+docs/ai-roadmap.md
+docs/page-map.md
 .pytest_cache/
 .coverage

@@ -1,46 +1,28 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ArrowClockwise,
   ArrowsDownUp,
   CaretDown,
-  ChartDonut,
   CheckCircle,
-  CirclesFour,
-  ClockCounterClockwise,
   CloudArrowDown,
   Copy,
-  Cpu,
   DotsThreeVertical,
-  Desktop,
   DownloadSimple,
   FileCode,
   Funnel,
-  GlobeHemisphereEast,
-  Globe,
-  GoogleLogo,
-  GithubLogo,
   HardDrives,
-  ListMagnifyingGlass,
   LinkSimple,
   Lightning,
   MagnifyingGlass,
-  OpenAiLogo,
-  Pause,
   PencilSimple,
   Plus,
-  Power,
-  Pulse,
-  Rows,
   ShieldCheck,
   Stack,
-  TelegramLogo,
   Trash,
   WarningCircle,
   WifiHigh,
-  WindowsLogo,
-  YoutubeLogo,
   X,
-  XLogo,
   AppleLogo,
 } from "@phosphor-icons/react";
 import {
@@ -72,17 +54,36 @@ import { Dashboard } from "./features/observability/DashboardPage";
 import { DeviceFlow } from "./features/observability/DeviceAnalysisPage";
 import { AuditPage } from "./features/observability/TrafficAnalysisPage";
 import { UsersPage } from "./features/users/UsersPage";
-import { bucketDuration, bytes, connectionDuration, connectionTime, rate } from "./lib/formatters";
+import { ChangePasswordDialog } from "./features/users/PasswordDialog";
+import { bytes, connectionDuration, connectionTime, rate } from "./lib/formatters";
 
 const DEMO_MODE = import.meta.env.DEV || import.meta.env.VITE_DEMO_MODE === "true";
 
 function StrategiesPage({ strategies, onChanged, canManage }) {
-  const [expanded, setExpanded] = useState(() => new Set((strategies.primary || []).slice(0, 3).map(group => group.id)));
-  const [secondaryExpanded, setSecondaryExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => {
+    const section = new URLSearchParams(location.search).get("section");
+    if (section === "secondary") {
+      const first = (strategies.secondary || []).find(group => group.selectable);
+      return first ? new Set([first.id]) : new Set();
+    }
+    return new Set((strategies.primary || []).slice(0, 1).map(group => group.id));
+  });
+  const [secondaryExpanded, setSecondaryExpanded] = useState(() => new URLSearchParams(location.search).get("section") === "secondary");
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState("");
   const [reconnect, setReconnect] = useState(true);
+  const [testing, setTesting] = useState(false);
   const [pending, setPending] = useState({});
+  const runTestDelay = async () => {
+    setTesting(true);
+    setMessage("正在重新测速…");
+    try {
+      const result = await api.testStrategyDelays();
+      setMessage(`重新测速完成：${result.updated ?? result.tested ?? 0} 个策略组已更新（${result.elapsedMs} ms）`);
+      await onChanged(result.strategies);
+    } catch (error) { setMessage(error.message); }
+    finally { setTesting(false); }
+  };
   const select = async (group, name) => {
     setPending(current => ({ ...current, [group.id]: name }));
     setMessage(`正在切换 ${group.name}…`);
@@ -106,9 +107,8 @@ function StrategiesPage({ strategies, onChanged, canManage }) {
     return [...unique.values()];
   };
   const toggle = (id) => setExpanded(current => {
-    const next = new Set(current);
-    next.has(id) ? next.delete(id) : next.add(id);
-    return next;
+    if (current.has(id)) return new Set();
+    return new Set([id]);
   });
   const memberKind = (group, member) => group.children?.find(child => child.id === member.id)?.modeLabel || (member.id === "DIRECT" ? "直连" : "节点");
   const memberDelay = (group, member) => group.children?.find(child => child.id === member.id) || member;
@@ -152,12 +152,22 @@ function StrategiesPage({ strategies, onChanged, canManage }) {
   };
   return (
     <div className="page-content strategies-page">
-      <div className="proxy-workbench-head"><h2>分流策略</h2><div className="proxy-workbench-actions"><label className="proxy-search"><MagnifyingGlass /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索策略或节点" /></label>{canManage && <label className="reconnect-toggle"><input type="checkbox" checked={reconnect} onChange={event => setReconnect(event.target.checked)} /><span><strong>切换后重连</strong></span></label>}</div></div>
+      <div className="proxy-workbench-head"><h2>分流策略</h2><div className="proxy-workbench-actions"><label className="proxy-search"><MagnifyingGlass /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索策略或节点" /></label>{canManage && <button type="button" className="retest-button" disabled={testing} onClick={runTestDelay}><ArrowClockwise className={testing ? "spinning" : ""} />{testing ? "测速中…" : "重新测速"}</button>}{canManage && <label className="reconnect-toggle"><input type="checkbox" checked={reconnect} onChange={event => setReconnect(event.target.checked)} /><span><strong>切换后重连</strong></span></label>}</div></div>
       <div className="proxy-summary-strip"><span><ArrowsDownUp />{strategies.primary.length} 个常用策略</span></div>
       {message && <div className="inline-message strategy-message">{message}</div>}
-      <div className="proxy-groups">{strategies.primary.map(strategySection)}</div>
+      <div className="proxy-groups">{strategies.primary.map(strategySection)}
       <button className="collapsed-groups proxy-secondary-toggle" onClick={() => setSecondaryExpanded(!secondaryExpanded)}><span><Stack />其他规则策略</span><small>{strategies.secondaryCount} 个</small><CaretDown className={secondaryExpanded ? "rotated" : ""}/></button>
-      {secondaryExpanded && <div className="secondary-grid">{strategies.secondary.filter(group => !query || `${group.name} ${group.now}`.toLowerCase().includes(query.toLowerCase())).map(group=><div className="secondary-group" key={group.name}><span>{group.name}</span><strong>{group.now}</strong></div>)}</div>}
+      {secondaryExpanded && <div className="secondary-grid">{strategies.secondary.filter(group => !query || `${group.name} ${group.now}`.toLowerCase().includes(query.toLowerCase())).map(group => group.selectable ? (
+        <section className={`secondary-group-card ${expanded.has(group.id) ? "is-open" : ""}`} key={group.id}>
+          <button className="secondary-group-head" type="button" onClick={() => toggle(group.id)}>
+            <span className="secondary-group-name"><b>{group.name}</b><em>{group.typeLabel}</em></span>
+            <span className="secondary-group-state"><small>{group.health?.available ?? group.members?.length ?? 0}/{group.health?.total ?? group.members?.length ?? 0} 可用</small><strong>{pending[group.id] ? `正在切换至 ${pending[group.id]}` : group.now}</strong>{delayChip(group)}<CaretDown className={expanded.has(group.id) ? "rotated" : ""} /></span>
+          </button>
+          {(expanded.has(group.id) || Boolean(query)) && <div className="proxy-member-grid">{group.members.filter(member => !query || `${member.name} ${group.name}`.toLowerCase().includes(query.toLowerCase())).map(member => memberCard(group, member))}</div>}
+        </section>
+      ) : (
+        <div className="secondary-group" key={group.id}><span>{group.name}<em>{group.modeLabel}</em></span><strong>{group.now}</strong><small>{group.health?.available ?? 0}/{group.health?.total ?? 0} 可用</small>{delayChip(group)}</div>
+      ))}</div>}</div>
     </div>
   );
 }
@@ -180,11 +190,41 @@ function RulesPage({ canManage }) {
   const [busy, setBusy] = useState(false);
   const [setEditor, setSetEditor] = useState(null);
   const [customEditor, setCustomEditor] = useState(null);
+  const [github, setGithub] = useState(null);
+  const [githubEditor, setGithubEditor] = useState(null);
+  const [syncBusy, setSyncBusy] = useState(false);
   const load = async () => {
     try { setWorkspace(await api.ruleWorkspace()); }
     catch (error) { if (DEMO_MODE) setWorkspace(demoRuleWorkspace); else setMessage(error.message); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); api.githubSync().then(setGithub).catch(() => {}); }, []);
+  const openGithubEditor = () => setGithubEditor({ repo: github?.repo || "", branch: github?.branch || "", path: github?.path || "", token: "", tokenConfigured: Boolean(github?.tokenConfigured) });
+  const saveGithubConfig = async (event) => {
+    event.preventDefault();
+    setSyncBusy(true); setMessage("");
+    try {
+      const result = await api.saveGithubSync({ repo: githubEditor.repo, branch: githubEditor.branch, path: githubEditor.path, token: githubEditor.token || undefined });
+      setGithub(result);
+      setGithubEditor(null);
+      setMessage("GitHub 同步配置已保存。");
+    } catch (error) { setMessage(error.message); }
+    finally { setSyncBusy(false); }
+  };
+  const runGithubSync = async (action, confirmText) => {
+    const prompt = confirmText || (action === "push" ? "推送会用本地自定义规则覆盖 GitHub 文件，继续吗？" : "");
+    if (prompt && !window.confirm(prompt)) return;
+    setSyncBusy(true); setMessage("");
+    try {
+      const result = action === "push" ? await api.githubSyncPush() : await api.githubSyncPull();
+      await load();
+      setGithub(await api.githubSync());
+      setGithubEditor(null);
+      setMessage(action === "push"
+        ? `已推送到 GitHub：${result.branch} @ ${result.commitSha || "—"}，共 ${result.count} 条规则。`
+        : `已从 GitHub 拉取 ${result.customRules} 条规则，点击「应用更改」后生效。`);
+    } catch (error) { setMessage(error.message); }
+    finally { setSyncBusy(false); }
+  };
   const run = async (action, success) => {
     setBusy(true); setMessage("");
     try { await action(); await load(); setMessage(success); return true; }
@@ -204,13 +244,14 @@ function RulesPage({ canManage }) {
   const sourceHost = (url) => { try { return new URL(url).hostname; } catch { return "无效地址"; } };
   const sets = (workspace?.ruleSets || []).filter(item => !query || `${item.name} ${item.url} ${item.policy}`.toLowerCase().includes(query.toLowerCase()));
   return <div className="page-content rules-page">
-    <div className="rules-hero"><h2>规则管理</h2><div className="rules-actions">{canManage && <button className="filter-button" disabled={busy} onClick={() => setSetEditor({ ...emptyRuleSet, policy: workspace?.availablePolicies?.[0] || "" })}>添加规则集</button>}{canManage && <button className="filter-button" disabled={busy} onClick={() => setCustomEditor({ content: "DOMAIN-SUFFIX,example.com,DIRECT", placement: "before", note: "", enabled: true })}>添加单条规则</button>}{canManage && <button className="filter-button" disabled={busy || !workspace?.appliedRevision} onClick={() => run(() => Promise.all((workspace?.ruleSets || []).filter(item => item.enabled).map(item => api.refreshRuleSet(item.id))), "所有已启用规则集均已刷新。")}>刷新规则源</button>}{canManage && <button className="primary-button" disabled={busy || !workspace?.dirty} onClick={() => run(api.applyRules, "规则已校验并热重载到网关。")}>{busy ? "处理中…" : workspace?.dirty ? "应用更改" : "已应用"}</button>}</div></div>
+    <div className="rules-hero"><h2>规则管理</h2><div className="rules-actions">{canManage && <button className="filter-button" disabled={busy} onClick={() => setSetEditor({ ...emptyRuleSet, policy: workspace?.availablePolicies?.[0] || "" })}>添加规则集</button>}{canManage && <button className="filter-button" disabled={busy} onClick={() => setCustomEditor({ content: "DOMAIN-SUFFIX,example.com,DIRECT", placement: "before", note: "", enabled: true })}>添加单条规则</button>}{canManage && <button className="filter-button" disabled={busy || !workspace?.appliedRevision} onClick={() => run(() => Promise.all((workspace?.ruleSets || []).filter(item => item.enabled).map(item => api.refreshRuleSet(item.id))), "所有已启用规则集均已刷新。")}>刷新规则源</button>}{canManage && <button className="filter-button" disabled={syncBusy} onClick={openGithubEditor}>GitHub 同步</button>}{canManage && <button className="primary-button" disabled={busy || !workspace?.dirty} onClick={() => run(api.applyRules, "规则已校验并热重载到网关。")}>{busy ? "处理中…" : workspace?.dirty ? "应用更改" : "已应用"}</button>}</div></div>
     {message && <div className="inline-message">{message}</div>}
     <div className="rule-stat-grid"><div><span>规则集</span><strong>{workspace?.counts?.ruleSets ?? "—"}</strong></div><div><span>自定义规则</span><strong>{workspace?.counts?.customRules ?? "—"}</strong></div><div><span>工作区版本</span><strong>r{workspace?.revision ?? "—"}</strong></div><div><span>安全兜底</span><strong>{workspace?.fallbackRules?.at(-1)?.policy || "—"}</strong></div></div>
-    <section className="panel rule-set-panel"><div className="rule-toolbar"><h3>有序规则集</h3><label className="search-box"><MagnifyingGlass /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、来源或目标策略" />{query && <button onClick={() => setQuery("")}><X /></button>}</label></div><div className="rule-set-head"><span>顺序 / 状态</span><span>规则集</span><span>目标策略</span><span>更新周期</span><span>操作</span></div><div className="rule-set-list">{sets.map((item, visibleIndex) => { const index = workspace.ruleSets.findIndex(row => row.id === item.id); return <div className={`rule-set-row ${!item.enabled ? "disabled" : ""}`} key={item.id}><span className="rule-order"><b>{String(index + 1).padStart(2,"0")}</b><label className="rule-switch"><input type="checkbox" disabled={!canManage || busy} checked={item.enabled} onChange={event => run(() => api.updateRuleSet(item.id, { enabled: event.target.checked }), event.target.checked ? "规则集已启用，应用后生效。" : "规则集已停用，应用后生效。")} /><i /></label></span><span className="rule-set-name"><strong>{item.name}</strong><small>{sourceHost(item.url)} · {item.behavior}/{item.format}</small></span><span><b className="policy-chip">{item.policy.replace(/^[^A-Za-z0-9\u3400-\u9fff]+/, "")}</b></span><span className="rule-interval">{Math.round(item.interval / 3600)} 小时</span><span className="rule-row-actions">{canManage && <><button disabled={busy || index === 0 || query} title="上移" onClick={() => run(() => api.moveRuleSet(item.id,"up"), "顺序已调整，应用后生效。")}>↑</button><button disabled={busy || index === workspace.ruleSets.length - 1 || query} title="下移" onClick={() => run(() => api.moveRuleSet(item.id,"down"), "顺序已调整，应用后生效。")}>↓</button><button onClick={() => setSetEditor({ ...item })}>编辑</button><button className="danger-link" onClick={() => confirm(`删除规则集「${item.name}」？`) && run(() => api.deleteRuleSet(item.id), "规则集已删除，应用后生效。")}>删除</button></>}</span></div>; })}</div></section>
+    <section className="panel rule-set-panel"><div className="rule-toolbar"><h3>有序规则集</h3><label className="search-box"><MagnifyingGlass /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、来源或目标策略" />{query && <button onClick={() => setQuery("")}><X /></button>}</label></div><div className="rule-set-head"><span>顺序 / 状态</span><span>规则集</span><span>目标策略</span><span>更新周期</span><span>操作</span></div><div className="rule-set-list">{sets.map((item, visibleIndex) => { const index = workspace.ruleSets.findIndex(row => row.id === item.id); return <div className={`rule-set-row ${!item.enabled ? "disabled" : ""}`} key={item.id}><span className="rule-order"><b>{String(index + 1).padStart(2,"0")}</b><label className="rule-switch"><input type="checkbox" disabled={!canManage || busy} checked={item.enabled} onChange={event => run(() => api.updateRuleSet(item.id, { enabled: event.target.checked }), event.target.checked ? "规则集已启用，应用后生效。" : "规则集已停用，应用后生效。")} /><i /></label></span><span className="rule-set-name"><strong>{item.name}</strong><small>{sourceHost(item.url)} · {item.behavior}/{item.format}</small></span><span><b className="policy-chip">{item.policy}</b></span><span className="rule-interval">{Math.round(item.interval / 3600)} 小时</span><span className="rule-row-actions">{canManage && <><button disabled={busy || index === 0 || query} title="上移" onClick={() => run(() => api.moveRuleSet(item.id,"up"), "顺序已调整，应用后生效。")}>↑</button><button disabled={busy || index === workspace.ruleSets.length - 1 || query} title="下移" onClick={() => run(() => api.moveRuleSet(item.id,"down"), "顺序已调整，应用后生效。")}>↓</button><button onClick={() => setSetEditor({ ...item })}>编辑</button><button className="danger-link" onClick={() => confirm(`删除规则集「${item.name}」？`) && run(() => api.deleteRuleSet(item.id), "规则集已删除，应用后生效。")}>删除</button></>}</span></div>; })}</div></section>
     <section className="panel custom-rules-panel"><div className="panel-heading"><h2>自定义覆盖规则</h2></div>{workspace?.customRules?.length ? <div className="custom-rule-list">{workspace.customRules.map(rule => <div className={!rule.enabled ? "disabled" : ""} key={rule.id}><label className="rule-switch"><input type="checkbox" disabled={!canManage} checked={rule.enabled} onChange={event => run(() => api.updateCustomRule(rule.id,{ enabled:event.target.checked }), "规则状态已更新。")}/><i /></label><span className="rule-placement">{rule.placement === "after" ? "后置" : "前置"}</span><code>{rule.content}</code><span className="policy-chip">{rule.policy}</span>{canManage && <span className="rule-row-actions"><button onClick={() => setCustomEditor({ ...rule })}>编辑</button><button className="danger-link" onClick={() => confirm("删除这条自定义规则？") && run(() => api.deleteCustomRule(rule.id), "自定义规则已删除。")}>删除</button></span>}</div>)}</div> : <div className="empty-rules">还没有自定义规则</div>}</section>
     {setEditor && <div className="modal-backdrop" onMouseDown={() => setSetEditor(null)}><form className="user-modal rule-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveSet}><div className="modal-heading"><div><span className="eyebrow">规则集</span><h3>{setEditor.id ? "编辑规则集" : "添加规则集"}</h3></div><button type="button" onClick={() => setSetEditor(null)}><X /></button></div><label>名称<input required value={setEditor.name} onChange={event => setSetEditor({...setEditor,name:event.target.value})}/></label><label>远程地址<input required type="url" value={setEditor.url} onChange={event => setSetEditor({...setEditor,url:event.target.value})}/></label><label>目标策略<select value={setEditor.policy} onChange={event => setSetEditor({...setEditor,policy:event.target.value})}>{workspace.availablePolicies.map(policy => <option key={policy} value={policy}>{policy}</option>)}</select></label><div className="modal-fields"><label>更新周期（秒）<input type="number" min="300" value={setEditor.interval} onChange={event => setSetEditor({...setEditor,interval:Number(event.target.value)})}/></label><label>内容格式<select value={setEditor.format} onChange={event => setSetEditor({...setEditor,format:event.target.value})}><option value="text">text</option><option value="yaml">yaml</option><option value="mrs">mrs</option></select></label></div><button className="primary-button modal-submit" disabled={busy}>保存到工作区</button></form></div>}
     {customEditor && <div className="modal-backdrop" onMouseDown={() => setCustomEditor(null)}><form className="user-modal rule-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveCustom}><div className="modal-heading"><div><span className="eyebrow">请求匹配</span><h3>{customEditor.id ? "编辑自定义规则" : "添加自定义规则"}</h3></div><button type="button" onClick={() => setCustomEditor(null)}><X /></button></div><label>规则内容<input required value={customEditor.content} onChange={event => setCustomEditor({...customEditor,content:event.target.value})} placeholder="DOMAIN-SUFFIX,example.com,节点选择"/><small>使用 mihomo 规则语法；保存后会解析并在应用时校验策略引用。</small></label><label>位置<select value={customEditor.placement} onChange={event => setCustomEditor({...customEditor,placement:event.target.value})}><option value="before">规则集之前（高优先级）</option><option value="after">规则集之后（低优先级）</option></select></label><label>备注<input value={customEditor.note || ""} onChange={event => setCustomEditor({...customEditor,note:event.target.value})}/></label><button className="primary-button modal-submit" disabled={busy}>保存到工作区</button></form></div>}
+    {githubEditor && <div className="modal-backdrop" onMouseDown={() => setGithubEditor(null)}><form className="user-modal rule-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveGithubConfig}><div className="modal-heading"><div><span className="eyebrow">自定义规则</span><h3>GitHub 同步</h3></div><button type="button" onClick={() => setGithubEditor(null)}><X /></button></div><label>仓库<input value={githubEditor.repo} onChange={event => setGithubEditor({...githubEditor,repo:event.target.value})} placeholder="例如 Rhythmicc/ACL4SSR" required/></label><label>分支<input value={githubEditor.branch} onChange={event => setGithubEditor({...githubEditor,branch:event.target.value})} placeholder="留空使用仓库默认分支"/></label><label>文件路径<input value={githubEditor.path} onChange={event => setGithubEditor({...githubEditor,path:event.target.value})} placeholder="例如 Clash/egresscope-custom-rules.json" required/></label><label>Personal Access Token<input type="password" autoComplete="new-password" value={githubEditor.token || ""} onChange={event => setGithubEditor({...githubEditor,token:event.target.value})} placeholder={githubEditor.tokenConfigured ? "已配置；留空表示保留" : "需要 repo 写权限的 Token"}/></label>{github?.lastError && <div className="subscription-error"><WarningCircle />{github.lastError}</div>}<div className="modal-actions-row"><button type="submit" className="primary-button modal-submit" disabled={syncBusy}>{syncBusy ? "处理中…" : "保存配置"}</button><button type="button" className="filter-button" disabled={syncBusy || !github?.tokenConfigured} onClick={() => runGithubSync("pull", "拉取会用 GitHub 上的规则替换本地自定义规则，继续吗？")}>从 GitHub 拉取</button><button type="button" className="filter-button" disabled={syncBusy || !github?.tokenConfigured} onClick={() => runGithubSync("push")}>推送到 GitHub</button></div>{github?.lastSyncAt ? <div className="github-sync-status">上次同步 {shanghaiTime(github.lastSyncAt)}</div> : <div className="github-sync-status">尚未同步</div>}</form></div>}
   </div>;
 }
 
@@ -229,7 +270,7 @@ const DEMO_GATEWAY = {
     startedAt: Date.parse("2026-08-10T05:30:23+08:00") / 1000, uptimeSeconds: 252557, online: true, version: "1.19.29",
     total: 13.24 * 1024 ** 3, activeExits: 4,
     access: [
-      { id: "gateway", name: "透明网关", up: 1.24 * 1024 ** 3, down: 4.63 * 1024 ** 3, total: 5.87 * 1024 ** 3, currentUpRate: 3400, currentDownRate: 128000, peakUpRate: 12.5 * 1024 ** 2, peakDownRate: 31.7 * 1024 ** 2, devices: ["U55C", "ssslab-login-1", "s80"] },
+      { id: "gateway", name: "透明网关", up: 1.24 * 1024 ** 3, down: 4.63 * 1024 ** 3, total: 5.87 * 1024 ** 3, currentUpRate: 3400, currentDownRate: 128000, peakUpRate: 12.5 * 1024 ** 2, peakDownRate: 31.7 * 1024 ** 2, devices: ["workstation", "compute-node", "storage-node"] },
       { id: "proxy", name: "显式代理", up: 1.61 * 1024 ** 3, down: 5.76 * 1024 ** 3, total: 7.37 * 1024 ** 3, currentUpRate: 1200, currentDownRate: 44000, peakUpRate: 9.8 * 1024 ** 2, peakDownRate: 24.1 * 1024 ** 2, devices: ["9462"] },
     ],
     exits: [
@@ -261,9 +302,9 @@ function GatewayPage({ canManage }) {
   const loadDevices = () => api.deviceAliases().then(result => { setAliases(result.aliases || {}); setDevices(result.devices || []); }).catch(error => {
     if (DEMO_MODE) {
       const sample = [
-        { ip: "192.168.31.42", name: "U55C", sourceType: "gateway", active: 3, lastSeen: Date.now() / 1000 },
-        { ip: "192.168.31.225", name: "ssslab-login-1", sourceType: "gateway", active: 1, lastSeen: Date.now() / 1000 },
-        { ip: "10.18.12.44", name: "9462", sourceType: "proxy", active: 2, lastSeen: Date.now() / 1000 },
+        { ip: "192.168.1.20", name: "workstation", sourceType: "gateway", active: 3, lastSeen: Date.now() / 1000 },
+        { ip: "192.168.1.30", name: "compute-node", sourceType: "gateway", active: 1, lastSeen: Date.now() / 1000 },
+        { ip: "10.10.0.12", name: "remote-client", sourceType: "proxy", active: 2, lastSeen: Date.now() / 1000 },
       ];
       setDevices(sample); setAliases(Object.fromEntries(sample.map(item => [item.ip, item.name])));
     } else setMessage(error.message);
@@ -295,7 +336,7 @@ function GatewayPage({ canManage }) {
 
 const DEMO_SUBSCRIPTIONS = {
   subscriptions: [{
-    id: "demo-g94", owner: "demo", name: "G94Cloud", maskedUrl: "https://www.g94cloud.com/••••",
+    id: "demo-provider", owner: "demo", name: "Example Provider", maskedUrl: "https://provider.example.com/••••",
     interval: 21600, enabled: true, gatewayEnabled: true, sourceFormat: "surge", nodeCount: 14, rawNodeCount: 16,
     filter: { includeRegex: "", excludeRegex: "剩余流量|到期|官网", excludeKeywords: ["套餐"], renameRules: [] },
     filterSource: "ai", filterPreview: { total: 16, kept: 14, excluded: 2, renamed: 0, excludedPreview: ["剩余流量 454 GB", "到期 2026-08-31"], keptPreview: [] },
@@ -304,7 +345,7 @@ const DEMO_SUBSCRIPTIONS = {
     fetchedAt: Date.parse("2026-08-12T23:15:00+08:00") / 1000, lastError: null,
     deliveryPaths: { surge: "#demo-surge", clash: "#demo-clash" },
   }],
-  summary: { count: 1, nodes: 16, healthy: 1, gateway: "G94Cloud" },
+  summary: { count: 1, nodes: 16, healthy: 1, gateway: "Example Provider" },
   ai: { provider: "deepseek", providerLabel: "DeepSeek", model: "deepseek-chat", configured: true },
 };
 
@@ -349,13 +390,73 @@ const filterEditorSignature = editor => editor ? JSON.stringify([
   editor.renameRules,
 ]) : "";
 
+function SubscriptionMenuPopover({ anchor, children }) {
+  const popoverRef = useRef(null);
+  const [position, setPosition] = useState({ top: 0, left: 0, width: 206, visibility: "hidden" });
+
+  useLayoutEffect(() => {
+    if (!anchor) return undefined;
+    const updatePosition = () => {
+      const popover = popoverRef.current;
+      if (!popover || !anchor.isConnected) return;
+      const viewport = window.visualViewport;
+      const viewportTop = viewport?.offsetTop || 0;
+      const viewportLeft = viewport?.offsetLeft || 0;
+      const viewportWidth = viewport?.width || window.innerWidth;
+      const viewportHeight = viewport?.height || window.innerHeight;
+      const margin = 12;
+      const gap = 8;
+      const width = Math.min(window.innerWidth <= 720 ? 224 : 206, viewportWidth - margin * 2);
+      const anchorRect = anchor.getBoundingClientRect();
+      const measuredHeight = Math.max(popover.scrollHeight + 2, popover.offsetHeight, 218);
+      const maxHeight = Math.max(120, viewportHeight - margin * 2);
+      const height = Math.min(measuredHeight, maxHeight);
+      const roomBelow = viewportTop + viewportHeight - margin - anchorRect.bottom - gap;
+      const roomAbove = anchorRect.top - viewportTop - margin - gap;
+      const openUpward = roomBelow < height && roomAbove > roomBelow;
+      const preferredTop = openUpward ? anchorRect.top - gap - height : anchorRect.bottom + gap;
+      const top = Math.min(
+        viewportTop + viewportHeight - margin - height,
+        Math.max(viewportTop + margin, preferredTop),
+      );
+      const left = Math.min(
+        viewportLeft + viewportWidth - margin - width,
+        Math.max(viewportLeft + margin, anchorRect.right - width),
+      );
+      setPosition({ top, left, width, maxHeight, visibility: "visible" });
+    };
+
+    updatePosition();
+    const frame = window.requestAnimationFrame(updatePosition);
+    const resizeObserver = new ResizeObserver(updatePosition);
+    resizeObserver.observe(popoverRef.current);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    window.visualViewport?.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("scroll", updatePosition);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      window.visualViewport?.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("scroll", updatePosition);
+    };
+  }, [anchor]);
+
+  return createPortal(
+    <div ref={popoverRef} className="subscription-menu-popover is-floating" role="menu" style={position}>{children}</div>,
+    document.body,
+  );
+}
+
 function SubscriptionsPage({ user }) {
   const [data, setData] = useState({ subscriptions: [], summary: { count: 0, nodes: 0, healthy: 0, gateway: null } });
   const [editor, setEditor] = useState(null);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState(false);
-  const [openMenu, setOpenMenu] = useState("");
+  const [openMenu, setOpenMenu] = useState(null);
   const [filterEditor, setFilterEditor] = useState(null);
   const [aiEditor, setAiEditor] = useState(null);
   const load = async () => {
@@ -368,9 +469,9 @@ function SubscriptionsPage({ user }) {
   useEffect(() => { load(); }, []);
   useEffect(() => {
     const closeMenu = event => {
-      if (!event.target.closest(".subscription-menu")) setOpenMenu("");
+      if (!event.target.closest(".subscription-menu, .subscription-menu-popover")) setOpenMenu(null);
     };
-    const closeOnEscape = event => { if (event.key === "Escape") setOpenMenu(""); };
+    const closeOnEscape = event => { if (event.key === "Escape") setOpenMenu(null); };
     document.addEventListener("pointerdown", closeMenu);
     document.addEventListener("keydown", closeOnEscape);
     return () => {
@@ -408,7 +509,7 @@ function SubscriptionsPage({ user }) {
     if (ok) setEditor(null);
   };
   const openFilter = async (item) => {
-    setOpenMenu(""); setBusy(`filter-${item.id}`); setMessage(""); setError(false);
+    setOpenMenu(null); setBusy(`filter-${item.id}`); setMessage(""); setError(false);
     try {
       const workspace = await api.subscriptionFilter(item.id);
       setFilterEditor(filterEditorFrom(item, workspace));
@@ -501,21 +602,21 @@ function SubscriptionsPage({ user }) {
         const used = Number(item.usage?.upload || 0) + Number(item.usage?.download || 0);
         const total = Number(item.usage?.total || 0);
         const percent = total ? Math.min(100, used / total * 100) : 0;
-        return <article className={`subscription-card ${item.gatewayEnabled ? "is-gateway" : ""} ${openMenu === item.id ? "menu-open" : ""}`} key={item.id}>
+        return <article className={`subscription-card ${item.gatewayEnabled ? "is-gateway" : ""} ${openMenu?.id === item.id ? "menu-open" : ""}`} key={item.id}>
           <div className="subscription-source"><span className={`subscription-health ${item.lastError ? "failed" : item.fetchedAt ? "healthy" : "pending"}`}><CloudArrowDown weight="fill" /></span><div><div className="subscription-title"><h3>{item.name}</h3>{item.gatewayEnabled && <b>网关节点源</b>}{item.filterPreview?.excluded > 0 && <em className="subscription-filter-badge">{item.filterSource === "ai" ? "AI 过滤" : "已过滤"} {item.filterPreview.excluded}</em>}{user?.role === "admin" && item.owner !== user.username && <em>{item.owner}</em>}</div><p>{item.maskedUrl}</p><div className="subscription-node-count"><HardDrives /><strong>{item.nodeCount || 0}</strong><span>{item.rawNodeCount > item.nodeCount ? `/ ${item.rawNodeCount} 个节点` : "个节点"}</span>{item.lastError && <b>刷新失败</b>}</div></div></div>
           <div className="subscription-quota"><div className="subscription-quota-value"><strong>{total ? bytes(used) : "—"}</strong><span>{total ? `已用 / ${bytes(total)}` : "来源未提供配额"}</span></div><i><u style={{ width: `${percent}%` }} /></i>{total > 0 && <b>{percent.toFixed(1)}%</b>}<div className="subscription-lifecycle"><span><b>到期时间</b><time>{item.usage?.expire ? shanghaiTime(item.usage.expire) : "未提供"}</time></span><span><b>更新时间</b><time>{item.lastError ? "刷新失败" : shanghaiTime(item.fetchedAt)}</time></span></div></div>
           <div className="subscription-card-actions">
             <div className="subscription-card-toolbar">
               {user?.role === "admin" ? <button className={`subscription-gateway-status ${item.gatewayEnabled ? "active" : ""}`} disabled={Boolean(busy) || (!item.gatewayEnabled && !item.nodeCount)} onClick={() => run(`gateway-${item.id}`, () => item.gatewayEnabled ? api.deactivateSubscription(item.id) : api.activateSubscription(item.id), item.gatewayEnabled ? "已停用订阅覆盖，网关恢复基础节点配置。" : "订阅已成为网关节点源，并已热重载。") }><span />{item.gatewayEnabled ? "网关使用中" : "用于网关"}</button> : <span className={`subscription-gateway-status ${item.gatewayEnabled ? "active" : ""}`}><span />{item.gatewayEnabled ? "网关使用中" : "个人订阅"}</span>}
               <div className="subscription-menu">
-                <button className="subscription-menu-trigger" aria-label={`管理 ${item.name}`} aria-expanded={openMenu === item.id} onClick={event => { event.stopPropagation(); setOpenMenu(current => current === item.id ? "" : item.id); }}><DotsThreeVertical weight="bold" /></button>
-                {openMenu === item.id && <div className="subscription-menu-popover" role="menu">
-                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); run(item.id, () => api.refreshSubscription(item.id), "订阅已刷新；节点库存与状态已更新。"); }}><ArrowClockwise className={busy === item.id ? "spinning" : ""} />立即刷新</button>
+                <button className="subscription-menu-trigger" aria-label={`管理 ${item.name}`} aria-expanded={openMenu?.id === item.id} onClick={event => { event.stopPropagation(); const anchor = event.currentTarget; setOpenMenu(current => current?.id === item.id ? null : { id: item.id, anchor }); }}><DotsThreeVertical weight="bold" /></button>
+                {openMenu?.id === item.id && <SubscriptionMenuPopover anchor={openMenu.anchor}>
+                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); run(item.id, () => api.refreshSubscription(item.id), "订阅已刷新；节点库存与状态已更新。"); }}><ArrowClockwise className={busy === item.id ? "spinning" : ""} />立即刷新</button>
                   <button role="menuitem" disabled={Boolean(busy)} onClick={() => openFilter(item)}><Funnel />节点过滤</button>
-                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); setEditor({ id: item.id, name: item.name, url: "", interval: item.interval, enabled: item.enabled }); }}><PencilSimple />编辑订阅</button>
-                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); if (confirm(`轮换「${item.name}」的交付链接？旧链接会立即失效。`)) run(`rotate-${item.id}`, () => api.rotateSubscriptionToken(item.id), "交付链接已轮换，旧链接已失效。"); }}><LinkSimple />轮换交付链接</button>
-                  <button role="menuitem" className="danger" disabled={Boolean(busy)} onClick={() => { setOpenMenu(""); if (confirm(`删除订阅「${item.name}」？交付地址将立即失效。`)) run(`delete-${item.id}`, () => api.deleteSubscription(item.id), "订阅已删除。"); }}><Trash />删除订阅</button>
-                </div>}
+                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); setEditor({ id: item.id, name: item.name, url: "", interval: item.interval, enabled: item.enabled }); }}><PencilSimple />编辑订阅</button>
+                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); if (confirm(`轮换「${item.name}」的交付链接？旧链接会立即失效。`)) run(`rotate-${item.id}`, () => api.rotateSubscriptionToken(item.id), "交付链接已轮换，旧链接已失效。"); }}><LinkSimple />轮换交付链接</button>
+                  <button role="menuitem" className="danger" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); if (confirm(`删除订阅「${item.name}」？交付地址将立即失效。`)) run(`delete-${item.id}`, () => api.deleteSubscription(item.id), "订阅已删除。"); }}><Trash />删除订阅</button>
+                </SubscriptionMenuPopover>}
               </div>
             </div>
             <div className="subscription-deliveries" aria-label={`${item.name} 配置链接`}>
@@ -527,7 +628,7 @@ function SubscriptionsPage({ user }) {
         </article>;
       })}</div> : <div className="subscription-empty"><CloudArrowDown /><h3>还没有订阅</h3><p>添加节点来源后，可定时刷新、生成隔离交付地址；管理员还可以把它设为网关节点源。</p><button className="primary-button" onClick={() => setEditor({ name: "", url: "", interval: 21600, enabled: true })}>添加第一个订阅</button></div>}
     </section>
-    {editor && <div className="modal-backdrop" onMouseDown={() => setEditor(null)}><form className="user-modal subscription-modal" onMouseDown={event => event.stopPropagation()} onSubmit={save}><div className="modal-heading"><div><span className="eyebrow">节点来源</span><h3>{editor.id ? "编辑订阅" : "添加订阅"}</h3></div><button type="button" onClick={() => setEditor(null)}><X /></button></div><label>名称<input required value={editor.name} onChange={event => setEditor({ ...editor, name: event.target.value })} placeholder="例如 G94Cloud" /></label><label>订阅地址<input required={!editor.id} type="url" value={editor.url} onChange={event => setEditor({ ...editor, url: event.target.value })} placeholder={editor.id ? "留空表示保留当前地址" : "https://example.com/subscribe"} /><small>地址视为凭据保存，不会在列表或 API 响应中明文返回。</small></label><div className="modal-fields"><label>刷新周期<select value={editor.interval} onChange={event => setEditor({ ...editor, interval: Number(event.target.value) })}><option value={3600}>1 小时</option><option value={21600}>6 小时</option><option value={43200}>12 小时</option><option value={86400}>24 小时</option><option value={604800}>7 天</option></select></label><label className="subscription-enabled">自动刷新<span><input type="checkbox" checked={editor.enabled} onChange={event => setEditor({ ...editor, enabled: event.target.checked })} />启用</span></label></div><button className="primary-button modal-submit" disabled={Boolean(busy)}>{busy ? "正在保存与解析…" : "保存订阅"}</button></form></div>}
+    {editor && <div className="modal-backdrop" onMouseDown={() => setEditor(null)}><form className="user-modal subscription-modal" onMouseDown={event => event.stopPropagation()} onSubmit={save}><div className="modal-heading"><div><span className="eyebrow">节点来源</span><h3>{editor.id ? "编辑订阅" : "添加订阅"}</h3></div><button type="button" onClick={() => setEditor(null)}><X /></button></div><label>名称<input required value={editor.name} onChange={event => setEditor({ ...editor, name: event.target.value })} placeholder="例如 Example Provider" /></label><label>订阅地址<input required={!editor.id} type="url" value={editor.url} onChange={event => setEditor({ ...editor, url: event.target.value })} placeholder={editor.id ? "留空表示保留当前地址" : "https://example.com/subscribe"} /><small>地址视为凭据保存，不会在列表或 API 响应中明文返回。</small></label><div className="modal-fields"><label>刷新周期<select value={editor.interval} onChange={event => setEditor({ ...editor, interval: Number(event.target.value) })}><option value={3600}>1 小时</option><option value={21600}>6 小时</option><option value={43200}>12 小时</option><option value={86400}>24 小时</option><option value={604800}>7 天</option></select></label><label className="subscription-enabled">自动刷新<span><input type="checkbox" checked={editor.enabled} onChange={event => setEditor({ ...editor, enabled: event.target.checked })} />启用</span></label></div><button className="primary-button modal-submit" disabled={Boolean(busy)}>{busy ? "正在保存与解析…" : "保存订阅"}</button></form></div>}
     {filterEditor && <div className="modal-backdrop" onMouseDown={() => !filterEditor.aiBusy && setFilterEditor(null)}><form className="user-modal subscription-filter-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveFilter}>
       <div className="modal-heading"><div><span className="eyebrow">节点过滤</span><h3>{filterEditor.name}</h3></div><button type="button" disabled={filterEditor.aiBusy} onClick={() => setFilterEditor(null)}><X /></button></div>
       <div className="filter-preview-grid"><span><small>原始节点</small><strong>{filterEditor.preview?.total ?? 0}</strong></span><span><small>保留</small><strong>{filterEditor.preview?.kept ?? 0}</strong></span><span><small>排除</small><strong>{filterEditor.preview?.excluded ?? 0}</strong></span><span><small>改名</small><strong>{filterEditor.preview?.renamed ?? 0}</strong></span></div>
@@ -567,6 +668,7 @@ export function App() {
   const [device, setDevice] = useState(null);
   const [auth, setAuth] = useState({ checked: false, required: false, user: null });
   const [login, setLogin] = useState({ loading: false, error: "" });
+  const [passwordDialog, setPasswordDialog] = useState(false);
   const [backendError, setBackendError] = useState("");
 
   useEffect(() => {
@@ -585,6 +687,16 @@ export function App() {
       else { setBackendError(error.message); setAuth({ checked: true, required: true, user: null }); }
     });
     return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setBackendError("");
+      setLogin({ loading: false, error: "会话已过期，请重新登录" });
+      setAuth((current) => (current.required && current.user ? { checked: true, required: true, user: null } : current));
+    };
+    addEventListener("egresscope:unauthorized", onUnauthorized);
+    return () => removeEventListener("egresscope:unauthorized", onUnauthorized);
   }, []);
 
   useEffect(() => {
@@ -623,14 +735,20 @@ export function App() {
   };
 
   const cycleTheme = () => setTheme((current) => current === "system" ? "light" : current === "light" ? "dark" : "system");
-  const refreshStrategies = async () => setStrategies(await api.strategies());
+  const refreshStrategies = async (payload) => {
+    if (payload) { setStrategies(payload); return; }
+    try { setStrategies(await api.strategies()); }
+    catch { /* Keep the last strategy snapshot; the caller already reported the selection result. */ }
+  };
   const visiblePage = canOpenPage(page, auth.user) ? page : "dashboard";
   const title = device ? "设备分析" : PAGE_TITLES[visiblePage];
-  const navigatePage = next => {
+  const navigatePage = (next, section) => {
     const target = canOpenPage(normalizePage(next), auth.user) ? normalizePage(next) : "dashboard";
     const url = new URL(location.href);
-    if (url.searchParams.get("page") !== target) {
+    if (url.searchParams.get("page") !== target || Boolean(section) !== url.searchParams.has("section")) {
       url.searchParams.set("page", target);
+      if (section) url.searchParams.set("section", section);
+      else url.searchParams.delete("section");
       history.pushState(null, "", url);
     }
     setDevice(null);
@@ -653,15 +771,18 @@ export function App() {
   }, []);
 
   if (!auth.checked) return <main className="login-screen" />;
-  if (backendError && !auth.user) return <ServiceUnavailable message={backendError} retry={() => location.reload()} />;
+  if (backendError && !auth.user && !login.error) return <ServiceUnavailable message={backendError} retry={() => location.reload()} />;
   if (auth.required && !auth.user) return <LoginScreen onLogin={doLogin} {...login} />;
-  if (!dashboard) return <ServiceUnavailable message={backendError} retry={() => location.reload()} />;
+  if (!dashboard) {
+    if (backendError) return <ServiceUnavailable message={backendError} retry={() => location.reload()} />;
+    return <main className="login-screen"><div className="boot-loading" role="status">正在加载</div></main>;
+  }
 
   return (
     <div className="app-shell">
-      <Sidebar page={visiblePage} setPage={navigatePage} collapsed={collapsed} setCollapsed={setCollapsed} user={auth.user} />
+      <Sidebar page={visiblePage} setPage={navigatePage} collapsed={collapsed} setCollapsed={setCollapsed} online={dashboard.status.online} theme={theme} cycleTheme={cycleTheme} onAccount={() => setPasswordDialog(true)} onLogout={doLogout} user={auth.user} />
       <div className="main-shell">
-        <Topbar title={title} online={dashboard.status.online} theme={theme} cycleTheme={cycleTheme} onLogout={doLogout} user={auth.user} />
+        <Topbar title={title} online={dashboard.status.online} theme={theme} cycleTheme={cycleTheme} onAccount={() => setPasswordDialog(true)} onLogout={doLogout} user={auth.user} />
         <main className="main-content">
           {backendError && <div className="inline-message is-error"><WarningCircle />数据刷新失败：{backendError}</div>}
           <PageRenderer
@@ -681,6 +802,7 @@ export function App() {
           />
         </main>
       </div>
+      {passwordDialog && <ChangePasswordDialog username={auth.user?.username} demoMode={DEMO_MODE} onClose={() => setPasswordDialog(false)} />}
     </div>
   );
 }

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-LATEST_SCHEMA_VERSION = 8
+LATEST_SCHEMA_VERSION = 9
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -358,7 +358,24 @@ def _migration_8(connection: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS = (_migration_1, _migration_2, _migration_3, _migration_4, _migration_5, _migration_6, _migration_7, _migration_8)
+def _migration_9(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS github_sync_settings (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            repo TEXT NOT NULL DEFAULT '',
+            branch TEXT NOT NULL DEFAULT '',
+            path TEXT NOT NULL DEFAULT '',
+            token TEXT NOT NULL DEFAULT '',
+            last_sync_at INTEGER,
+            last_error TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+
+
+MIGRATIONS = (_migration_1, _migration_2, _migration_3, _migration_4, _migration_5, _migration_6, _migration_7, _migration_8, _migration_9)
 
 
 def migrate(connection: sqlite3.Connection) -> None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import ipaddress
 import json
@@ -34,10 +36,12 @@ from .database import migrate as migrate_database
 from .mihomo import MihomoClient
 from .schemas import (
     AISettingsRequest,
+    ChangePasswordRequest,
     CreateUserRequest,
     CustomRuleRequest,
     CustomRuleUpdateRequest,
     DeviceAliasesRequest,
+    GitHubSyncRequest,
     LoginRequest,
     RuleMoveRequest,
     RuleSetRequest,
@@ -246,28 +250,33 @@ def _exclusive_exit_usage(rows: list[Any], expected_total: int, group_names: set
 
 def _backfill_daily_rollups(connection: sqlite3.Connection) -> None:
     """Repair recent rollups from raw rows without replacing the oldest partial-retention day."""
-    offset = int(_display_datetime().utcoffset().total_seconds())
     first_full_day = _calendar_start("day", int(time.time()) - settings.retention_days * 86400) + 86400
-    connection.execute(
-        """
-        INSERT OR REPLACE INTO traffic_daily_rollups(day_start,device,chain,up_bytes,down_bytes,active_peak,samples)
-        SELECT ((ts + ?) / 86400) * 86400 - ?, device, chain,
-               SUM(up_bytes), SUM(down_bytes), MAX(active), COUNT(*)
-        FROM traffic_samples WHERE ts >= ?
-        GROUP BY ((ts + ?) / 86400), device, chain
-        """,
-        (offset, offset, first_full_day, offset),
-    )
-    connection.execute(
-        """
-        INSERT OR REPLACE INTO traffic_detail_daily_rollups(day_start,device,service,host,exit_mode,up_bytes,down_bytes,connections)
-        SELECT ((ts + ?) / 86400) * 86400 - ?, device, service, host, exit_mode,
-               SUM(up_bytes), SUM(down_bytes), SUM(connections)
-        FROM traffic_detail_samples WHERE ts >= ?
-        GROUP BY ((ts + ?) / 86400), device, service, host, exit_mode
-        """,
-        (offset, offset, first_full_day, offset),
-    )
+    current_day = _calendar_start("day", int(time.time()))
+    # Bound each GROUP BY to one calendar day. A single retention-wide aggregate can
+    # make SQLite spill hundreds of megabytes to /tmp and prevent an otherwise
+    # healthy appliance from starting when the container uses a small tmpfs.
+    day_start = first_full_day
+    while day_start <= current_day:
+        day_end = day_start + 86400
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO traffic_daily_rollups(day_start,device,chain,up_bytes,down_bytes,active_peak,samples)
+            SELECT ?, device, chain, SUM(up_bytes), SUM(down_bytes), MAX(active), COUNT(*)
+            FROM traffic_samples WHERE ts >= ? AND ts < ?
+            GROUP BY device, chain
+            """,
+            (day_start, day_start, day_end),
+        )
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO traffic_detail_daily_rollups(day_start,device,service,host,exit_mode,up_bytes,down_bytes,connections)
+            SELECT ?, device, service, host, exit_mode, SUM(up_bytes), SUM(down_bytes), SUM(connections)
+            FROM traffic_detail_samples WHERE ts >= ? AND ts < ?
+            GROUP BY device, service, host, exit_mode
+            """,
+            (day_start, day_start, day_end),
+        )
+        day_start = day_end
 
 
 class AuthStore(AuthRepository):
@@ -279,6 +288,7 @@ class AuthStore(AuthRepository):
 
 auth = AuthStore()
 login_limiter = LoginRateLimiter()
+password_change_limiter = LoginRateLimiter(attempts=5, window_seconds=300)
 
 
 mihomo = MihomoClient(settings.controller_url, settings.controller_secret)
@@ -424,7 +434,10 @@ def _surge_proxy(name: str, value: str) -> dict[str, Any] | None:
     elif proxy_type in {"vmess", "vless"}:
         proxy["uuid"] = parameters.get("username", parameters.get("uuid", ""))
         if proxy_type == "vmess":
-            proxy["alterId"] = int(parameters.get("alter-id", parameters.get("alterid", "0")) or 0)
+            try:
+                proxy["alterId"] = int(parameters.get("alter-id", parameters.get("alterid", "0")) or 0)
+            except ValueError:
+                proxy["alterId"] = 0
             proxy["cipher"] = parameters.get("encrypt-method", parameters.get("cipher", "auto"))
     elif proxy_type in {"socks5", "http"}:
         if parameters.get("username"):
@@ -517,6 +530,19 @@ def _subscription_usage(value: str | None) -> dict[str, int]:
 def _masked_subscription_url(value: str) -> str:
     parsed = urlparse(value)
     return f"{parsed.scheme}://{parsed.hostname or '未知来源'}/••••"
+
+
+def _sanitized_subscription_error(exc: Exception, source_url: str) -> str:
+    """Keep refresh diagnostics useful without exposing subscription credentials."""
+    message = str(exc).strip() or "订阅刷新失败"
+    message = message.replace(source_url, _masked_subscription_url(source_url))
+    message = re.sub(
+        r"https?://[^\s\"'<>]+",
+        lambda match: _masked_subscription_url(match.group(0)),
+        message,
+        flags=re.IGNORECASE,
+    )
+    return message[:500]
 
 
 def _overlay_subscription_nodes(config: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -887,7 +913,7 @@ async def _validate_fake_ip_hostname(hostname: str) -> tuple[str, ...]:
         ("https://cloudflare-dns.com/dns-query", {"Accept": "application/dns-json"}),
         ("https://dns.google/resolve", {}),
     )
-    async with httpx.AsyncClient(timeout=8, follow_redirects=False, headers={"User-Agent": "Egresscope/0.2"}) as client:
+    async with httpx.AsyncClient(timeout=8, follow_redirects=False, trust_env=False, headers={"User-Agent": "Egresscope/0.2"}) as client:
         for endpoint, headers in resolvers:
             resolved: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
             try:
@@ -978,10 +1004,16 @@ async def _download_subscription(value: str) -> tuple[bytes, dict[str, int]]:
                         raise ValueError("订阅重定向缺少目标地址")
                     current = urljoin(current, location)
                     continue
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    raise ValueError(f"订阅源返回 HTTP {response.status_code}")
                 declared_size = response.headers.get("content-length")
-                if declared_size and int(declared_size) > SUBSCRIPTION_MAX_BYTES:
-                    raise ValueError("订阅内容超过 8 MiB 限制")
+                if declared_size:
+                    try:
+                        declared_exceeds_limit = int(declared_size) > SUBSCRIPTION_MAX_BYTES
+                    except ValueError:
+                        declared_exceeds_limit = False
+                    if declared_exceeds_limit:
+                        raise ValueError("订阅内容超过 8 MiB 限制")
                 content = bytearray()
                 async for chunk in response.aiter_bytes():
                     content.extend(chunk)
@@ -1148,9 +1180,10 @@ class SubscriptionStore:
                     )
         except Exception as exc:
             now = int(time.time())
+            message = _sanitized_subscription_error(exc, str(row["url"]))
             with _db() as connection:
-                connection.execute("UPDATE subscriptions SET last_error=?,next_refresh_at=?,updated_at=? WHERE id=?", (str(exc)[:500], now + min(900, int(row["interval_seconds"])), now, subscription_id))
-            raise
+                connection.execute("UPDATE subscriptions SET last_error=?,next_refresh_at=?,updated_at=? WHERE id=?", (message, now + min(900, int(row["interval_seconds"])), now, subscription_id))
+            raise ValueError(message) from None
         refreshed = self._row(subscription_id)
         assert refreshed is not None
         return self._public(refreshed)
@@ -1564,6 +1597,21 @@ class RuleWorkspace:
         self._save(workspace)
 
     @_serialized_rule_operation
+    def custom_rules_snapshot(self) -> list[dict[str, Any]]:
+        workspace = self._load()
+        assert workspace is not None
+        return list(workspace.get("customRules") or [])
+
+    @_serialized_rule_operation
+    def replace_custom_rules(self, rules: list[dict[str, Any]]) -> dict[str, Any]:
+        workspace = self._load()
+        assert workspace is not None
+        workspace["customRules"] = rules
+        self._touch(workspace)
+        self._save(workspace)
+        return {"customRules": len(rules)}
+
+    @_serialized_rule_operation
     def compile(self) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
         workspace = self._load()
         assert workspace is not None
@@ -1646,6 +1694,242 @@ class RuleWorkspace:
 
 
 rule_workspace = RuleWorkspace()
+
+
+class GitHubSyncStore:
+    """Persist a GitHub Contents-API sync target for the custom-rule overlay.
+
+    The custom rules edited in the 规则管理 workspace are the user's own
+    override layer; this store keeps the target repository/branch/path and
+    pushes or pulls that layer through the GitHub Contents API (no git binary).
+    """
+
+    def __init__(self, database: DatabaseFactory) -> None:
+        self._database = database
+
+    _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+    _INVALID_BRANCH_RE = re.compile(r"[\x00-\x20~^:?*\[\\]")
+    _MAX_SYNC_BYTES = 2 * 1024 * 1024
+    _MAX_RULES = 5000
+    _RULE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+    @classmethod
+    def _validated_target(cls, repo: str, branch: str, path: str) -> tuple[str, str, str]:
+        repo = repo.strip().strip("/")
+        branch = branch.strip()
+        path = path.strip().strip("/")
+        if not cls._REPOSITORY_RE.fullmatch(repo) or any(part in {".", ".."} for part in repo.split("/")):
+            raise ValueError("仓库必须填写为 owner/repository")
+        if branch:
+            if (
+                len(branch) > 200
+                or cls._INVALID_BRANCH_RE.search(branch)
+                or branch.startswith(("/", "."))
+                or branch.endswith(("/", ".", ".lock"))
+                or "//" in branch
+                or ".." in branch
+                or "@{" in branch
+            ):
+                raise ValueError("分支名称无效")
+        if not path:
+            raise ValueError("文件路径不能为空")
+        if len(path) > 240:
+            raise ValueError("文件路径最多 240 个字符")
+        path_parts = path.split("/")
+        if (
+            any(part in {"", ".", ".."} for part in path_parts)
+            or any(ord(character) < 32 for character in path)
+            or any(character in path for character in ("\\", "?", "#"))
+        ):
+            raise ValueError("文件路径无效")
+        return repo, branch, path
+
+    @classmethod
+    def _rules_from_payload(cls, payload: Any) -> list[dict[str, Any]]:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != 1
+            or payload.get("kind") != "egresscope-custom-rules"
+            or not isinstance(payload.get("customRules"), list)
+        ):
+            raise ValueError("远程文件不是 Egresscope 自定义规则格式")
+        if len(payload["customRules"]) > cls._MAX_RULES:
+            raise ValueError(f"远程文件包含过多规则（上限 {cls._MAX_RULES} 条）")
+        rules: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for index, rule in enumerate(payload["customRules"], 1):
+            if not isinstance(rule, dict):
+                raise ValueError(f"远程文件第 {index} 条规则格式无效")
+            content = str(rule.get("content") or "").strip()
+            if not 3 <= len(content) <= 4096:
+                raise ValueError(f"远程文件第 {index} 条规则内容长度无效")
+            rule_id = str(rule.get("id") or "").strip()
+            if not cls._RULE_ID_RE.fullmatch(rule_id) or rule_id in seen_ids:
+                rule_id = secrets.token_hex(8)
+            seen_ids.add(rule_id)
+            enabled_value = rule.get("enabled", True)
+            rules.append(
+                {
+                    "id": rule_id,
+                    "content": content,
+                    "placement": "after" if str(rule.get("placement")) == "after" else "before",
+                    "note": str(rule.get("note") or "")[:300],
+                    "enabled": enabled_value if isinstance(enabled_value, bool) else True,
+                }
+            )
+        return rules
+
+    def get(self) -> dict[str, Any]:
+        with self._database() as connection:
+            row = connection.execute("SELECT * FROM github_sync_settings WHERE id = 1").fetchone()
+        return {
+            "repo": str(row["repo"]) if row else "",
+            "branch": str(row["branch"]) if row else "",
+            "path": str(row["path"]) if row else "",
+            "tokenConfigured": bool(row and row["token"]),
+            "lastSyncAt": row["last_sync_at"] if row else None,
+            "lastError": str(row["last_error"] or "") if row else "",
+            "updatedAt": row["updated_at"] if row else None,
+        }
+
+    def update(self, repo: str, branch: str, path: str, token: str | None) -> dict[str, Any]:
+        repo, branch, path = self._validated_target(repo, branch, path)
+        with self._database() as connection:
+            row = connection.execute("SELECT token FROM github_sync_settings WHERE id = 1").fetchone()
+        existing_token = str(row["token"]) if row else ""
+        stored_token = token.strip() if token else existing_token
+        now = int(time.time())
+        with self._database() as connection:
+            connection.execute(
+                """
+                INSERT INTO github_sync_settings(id,repo,branch,path,token,last_sync_at,last_error,updated_at)
+                VALUES(1,?,?,?,?,NULL,'',?)
+                ON CONFLICT(id) DO UPDATE SET
+                    repo=excluded.repo,branch=excluded.branch,path=excluded.path,
+                    token=excluded.token,last_error='',updated_at=excluded.updated_at
+                """,
+                (repo, branch, path, stored_token, now),
+            )
+        return self.get()
+
+    def record_error(self, message: str) -> None:
+        with self._database() as connection:
+            connection.execute(
+                "UPDATE github_sync_settings SET last_error=?, updated_at=? WHERE id=1",
+                (str(message)[:500], int(time.time())),
+            )
+
+    @staticmethod
+    def _headers(token: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "Egresscope/0.2",
+        }
+
+    def _token(self) -> str:
+        with self._database() as connection:
+            row = connection.execute("SELECT token FROM github_sync_settings WHERE id = 1").fetchone()
+        if not row or not row["token"]:
+            raise ValueError("请先配置 GitHub Token")
+        return str(row["token"])
+
+    async def _branch(self, client: httpx.AsyncClient, repo: str, configured: str) -> str:
+        if configured:
+            return configured
+        response = await client.get(f"/repos/{repo}")
+        response.raise_for_status()
+        return str((response.json() or {}).get("default_branch") or "main")
+
+    async def push(self, rules: list[dict[str, Any]]) -> dict[str, Any]:
+        settings = self.get()
+        token = self._token()
+        payload = {
+            "version": 1,
+            "kind": "egresscope-custom-rules",
+            "updatedAt": int(time.time()),
+            "customRules": [
+                {
+                    "id": str(rule.get("id") or ""),
+                    "content": str(rule.get("content") or "").strip(),
+                    "placement": "after" if str(rule.get("placement")) == "after" else "before",
+                    "note": str(rule.get("note") or "")[:300],
+                    "enabled": bool(rule.get("enabled", True)),
+                }
+                for rule in rules
+            ],
+        }
+        raw_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        if len(raw_payload) > self._MAX_SYNC_BYTES:
+            raise ValueError("自定义规则过大，无法同步（上限 2 MiB）")
+        encoded = base64.b64encode(raw_payload).decode()
+        path = quote(settings["path"], safe="/")
+        async with httpx.AsyncClient(
+            base_url="https://api.github.com",
+            headers=self._headers(token),
+            timeout=httpx.Timeout(20, connect=8),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            branch = await self._branch(client, settings["repo"], settings["branch"])
+            remote_sha = ""
+            try:
+                existing = await client.get(f"/repos/{settings['repo']}/contents/{path}", params={"ref": branch})
+                existing.raise_for_status()
+                remote_sha = str((existing.json() or {}).get("sha") or "")
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+            body: dict[str, Any] = {"message": "Sync custom rules from Egresscope panel", "content": encoded, "branch": branch}
+            if remote_sha:
+                body["sha"] = remote_sha
+            response = await client.put(f"/repos/{settings['repo']}/contents/{path}", json=body)
+            response.raise_for_status()
+            result = response.json()
+        commit_sha = str((result.get("commit") or {}).get("sha") or "")
+        now = int(time.time())
+        with self._database() as connection:
+            connection.execute("UPDATE github_sync_settings SET last_sync_at=?, last_error='' WHERE id=1", (now,))
+        return {"ok": True, "branch": branch, "commitSha": commit_sha[:12], "count": len(payload["customRules"]), "syncedAt": now}
+
+    async def pull(self) -> list[dict[str, Any]]:
+        settings = self.get()
+        token = self._token()
+        path = quote(settings["path"], safe="/")
+        async with httpx.AsyncClient(
+            base_url="https://api.github.com",
+            headers=self._headers(token),
+            timeout=httpx.Timeout(20, connect=8),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            branch = await self._branch(client, settings["repo"], settings["branch"])
+            response = await client.get(f"/repos/{settings['repo']}/contents/{path}", params={"ref": branch})
+            if response.status_code == 404:
+                raise ValueError("远程路径下没有该文件，请先推送或检查路径")
+            response.raise_for_status()
+            data = response.json()
+            if data.get("encoding") not in {None, "base64"}:
+                raise ValueError("远程文件编码不受支持")
+            try:
+                encoded = "".join(str(data.get("content") or "").split())
+                if len(encoded) > ((self._MAX_SYNC_BYTES + 2) // 3) * 4:
+                    raise ValueError("远程文件过大，无法同步（上限 2 MiB）")
+                raw_content = base64.b64decode(encoded, validate=True)
+                if len(raw_content) > self._MAX_SYNC_BYTES:
+                    raise ValueError("远程文件过大，无法同步（上限 2 MiB）")
+                content = raw_content.decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError) as exc:
+                raise ValueError("远程文件不是有效的文本内容") from exc
+            try:
+                payload = json.loads(content)
+            except json.JSONDecodeError as exc:
+                raise ValueError("远程文件不是有效的 JSON 格式") from exc
+        return self._rules_from_payload(payload)
+
+
+github_sync = GitHubSyncStore(_db)
 
 
 async def _handle_traffic_anomaly(
@@ -1828,10 +2112,16 @@ REGION_FLAGS = (
 )
 
 
-def _display_node_name(name: str) -> str:
-    """Keep a provider's flag, or infer one for display without changing its mihomo id."""
+_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u2190-\u21FF]")
+
+
+def _display_name(name: str) -> str:
+    """Display form that preserves a provider's emoji; infer a flag only for plain names.
+
+    Never rewrites the mihomo id — this only shapes what the panel renders.
+    """
     raw = (name or "").strip()
-    if re.search(r"[\U0001F1E6-\U0001F1FF]{2}", raw):
+    if _EMOJI_RE.search(raw):
         return raw
     cleaned = _clean_name(raw)
     lowered = cleaned.casefold()
@@ -1841,6 +2131,10 @@ def _display_node_name(name: str) -> str:
     return cleaned
 
 
+def _display_node_name(name: str) -> str:
+    return _display_name(name)
+
+
 def _duration(start: str | None) -> str:
     if not start:
         return "—"
@@ -1848,7 +2142,7 @@ def _duration(start: str | None) -> str:
         begun = datetime.fromisoformat(start.replace("Z", "+00:00"))
         seconds = max(0, int((datetime.now(timezone.utc) - begun).total_seconds()))
         return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
-    except ValueError:
+    except (ValueError, TypeError):
         return "—"
 
 
@@ -1857,7 +2151,7 @@ def _start_timestamp(start: str | None, fallback: int) -> int:
         return fallback
     try:
         return int(datetime.fromisoformat(start.replace("Z", "+00:00")).timestamp())
-    except ValueError:
+    except (ValueError, TypeError):
         return fallback
 
 
@@ -1930,9 +2224,14 @@ class TrafficCollector:
             if upload_state and download_state:
                 seen_at = max(upload_state[1], download_state[1])
                 self._previous_totals = (upload_state[0], download_state[0], float(seen_at))
+            # connection_cursors only ever holds the connections present at the
+            # last persist cycle (each persist replaces the whole table), so
+            # restoring every row is bounded by the concurrent connection count.
+            # A narrow 300s window made long-lived connections that survived a
+            # panel restart look brand new, double-counting their cumulative
+            # bytes on the first sample after the restart.
             cursor_rows = connection.execute(
-                "SELECT id,upload_bytes,download_bytes,seen_at FROM connection_cursors WHERE seen_at >= ?",
-                (now - 300,),
+                "SELECT id,upload_bytes,download_bytes,seen_at FROM connection_cursors",
             ).fetchall()
             self._previous_connections = {
                 str(row["id"]): (int(row["upload_bytes"]), int(row["download_bytes"]), float(row["seen_at"]))
@@ -2032,7 +2331,7 @@ class TrafficCollector:
             service, target = _service_for(host, destination_ip)
             device_name = aliases.get(source_ip, source_ip)
             raw_chain = [str(item) for item in (connection.get("chains") or [])]
-            display_chain = [_clean_name(item) for item in reversed(raw_chain)]
+            display_chain = list(reversed(raw_chain))
             if not display_chain:
                 display_chain = ["DIRECT"]
             exit_mode = "direct" if "DIRECT" in display_chain else "proxy"
@@ -2375,20 +2674,21 @@ class TrafficCollector:
             connection.execute("DELETE FROM traffic_flow_daily_rollups WHERE day_start < ?", (day_start - 400 * 86400,))
 
     def visible_connections(self, user: dict[str, Any]) -> list[dict[str, Any]]:
-        allowed = set(user.get("allowedDevices") or [])
-        if user.get("role") == "admin":
-            return self.connections
-        return [row for row in self.connections if row["sourceIP"] in allowed]
+        allowed = _readable_device_scope(user)
+        rows = [row for row in self.connections if not _is_infrastructure_source(str(row["sourceIP"]))]
+        if allowed is None:
+            return rows
+        return [row for row in rows if row["sourceIP"] in allowed]
 
     def visible_devices(self, user: dict[str, Any]) -> list[dict[str, Any]]:
-        allowed = set(user.get("allowedDevices") or [])
-        if user.get("role") == "admin":
+        allowed = _readable_device_scope(user)
+        if allowed is None:
             return [row for row in self.devices if not _is_infrastructure_source(str(row["ip"]))]
         return [row for row in self.devices if row["ip"] in allowed and not _is_infrastructure_source(str(row["ip"]))]
 
     def dashboard(self, user: dict[str, Any], timeline_range: str = "live") -> dict[str, Any]:
         connections = self.visible_connections(user)
-        allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+        allowed = _readable_device_scope(user)
 
         def scoped_where(start: int, end: int | None = None) -> tuple[str, list[Any]]:
             conditions = ["ts >= ?"]
@@ -2423,13 +2723,19 @@ class TrafficCollector:
         now = int(time.time())
         month_start = _calendar_start("month", now)
         previous_month_start = _calendar_start("month", month_start - 1)
+        today_start = _calendar_start("day", now)
+        yesterday_start = _calendar_start("day", today_start - 1)
         month_where, month_params = rollup_where(month_start)
         previous_month_where, previous_month_params = rollup_where(previous_month_start, month_start)
+        today_where, today_params = rollup_where(today_start)
+        yesterday_where, yesterday_params = rollup_where(yesterday_start, today_start)
         timeline_start, _, bucket_seconds, time_format = _range_window(timeline_range, now)
         timeline_where, timeline_params = scoped_where(timeline_start)
         with _db() as connection:
             current_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {month_where}", month_params).fetchone()["total"]
             previous_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {previous_month_where}", previous_month_params).fetchone()["total"]
+            today_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {today_where}", today_params).fetchone()["total"]
+            yesterday_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {yesterday_where}", yesterday_params).fetchone()["total"]
             device_rows = connection.execute(
                 f"SELECT device,SUM(up_bytes + down_bytes) total FROM traffic_daily_rollups WHERE {month_where} AND device != 'unknown' GROUP BY device ORDER BY total DESC",
                 month_params,
@@ -2465,10 +2771,11 @@ class TrafficCollector:
         timeline = _traffic_timeline(timeline_rows, time_format)
         timeline_summary = _traffic_summary(timeline_rows)
         month_change = round((int(current_total) / int(previous_total) - 1) * 100, 1) if previous_total else 0
+        day_change = round((int(today_total) / int(yesterday_total) - 1) * 100, 1) if yesterday_total else 0
         uptime = int(time.monotonic() - self.started)
         return {
             "status": {"online": self.online, "version": self.version, "uptime": f"{uptime // 86400} 天 {uptime % 86400 // 3600} 小时"},
-            "totals": {"active": len(connections), "upRate": round(sum(row["upRate"] for row in connections)), "downRate": round(sum(row["downRate"] for row in connections)), "month": int(current_total), "previousMonth": int(previous_total), "monthChange": month_change, "today": int(current_total), "dayChange": month_change},
+            "totals": {"active": len(connections), "upRate": round(sum(row["upRate"] for row in connections)), "downRate": round(sum(row["downRate"] for row in connections)), "month": int(current_total), "previousMonth": int(previous_total), "monthChange": month_change, "today": int(today_total), "dayChange": day_change},
             "timeline": timeline,
             "timelineRange": timeline_range,
             "timelineBucketSeconds": bucket_seconds,
@@ -2480,6 +2787,18 @@ class TrafficCollector:
 
 
 collector = TrafficCollector()
+
+
+def _readable_device_scope(user: dict[str, Any]) -> set[str] | None:
+    """Resolve the filter for read-only observability data.
+
+    Viewers without an explicit device list receive the global read-only view;
+    a non-empty list narrows that view. Writes remain guarded by ``admin_user``.
+    """
+    if user.get("role") == "admin":
+        return None
+    configured = {str(address).strip() for address in user.get("allowedDevices") or [] if str(address).strip()}
+    return configured or None
 
 
 def _device_access_type(address: str) -> str:
@@ -2494,7 +2813,7 @@ def _device_access_type(address: str) -> str:
 
 def _known_devices(user: dict[str, Any]) -> list[dict[str, Any]]:
     """Merge live sources with the retained audit inventory, respecting user scope."""
-    allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    allowed = _readable_device_scope(user)
     aliases = _aliases()
     if allowed is not None and not allowed:
         return []
@@ -2782,7 +3101,7 @@ async def strategy_payload() -> dict[str, Any]:
         delay_ceiling = max(delay_values) if delay_values else None
         delay_copy = f"{delay}–{delay_ceiling} ms" if delay and delay_ceiling and delay != delay_ceiling else f"{delay} ms" if delay else "待测速"
         available = sum(1 for member in members if member["alive"])
-        return {"id": name, "name": _clean_name(name), "type": group_type, "typeLabel": "地区策略" if any(region in name for region in REGIONS) else "入口策略", "modeLabel": mode_label, "selectable": selectable, "now": _display_node_name(now), "nowId": now, "delayMs": delay, "delay": delay_copy, "delayLevel": delay_level(delay_ceiling, available > 0), "health": {"available": available, "total": len(members)}, "members": members, "children": []}
+        return {"id": name, "name": _display_name(name), "type": group_type, "typeLabel": "地区策略" if any(region in name for region in REGIONS) else "入口策略", "modeLabel": mode_label, "selectable": selectable, "now": _display_node_name(now), "nowId": now, "delayMs": delay, "delay": delay_copy, "delayLevel": delay_level(delay_ceiling, available > 0), "health": {"available": available, "total": len(members)}, "members": members, "children": []}
 
     top_names: list[str] = []
     for keyword in ("节点选择", "手动切换", "手动选择"):
@@ -3026,6 +3345,30 @@ async def logout(response: Response) -> dict[str, bool]:
     return {"ok": True}
 
 
+@app.post("/api/auth/change-password")
+async def change_password(
+    request: ChangePasswordRequest,
+    response: Response,
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    rate_key = f"password:{user['id']}"
+    retry_after = password_change_limiter.check(rate_key)
+    if retry_after:
+        raise HTTPException(status_code=429, detail="密码验证失败次数过多，请稍后再试", headers={"Retry-After": str(retry_after)})
+    try:
+        updated = await asyncio.to_thread(auth.change_password, user["id"], request.currentPassword, request.newPassword)
+    except ValueError as exc:
+        if str(exc) == "当前密码不正确":
+            password_change_limiter.failure(rate_key)
+            await asyncio.sleep(.25)
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    password_change_limiter.success(rate_key)
+    response.set_cookie("egresscope_session", auth.token(updated), httponly=True, secure=settings.secure_cookie, samesite="strict", max_age=12 * 3600, path="/")
+    response.delete_cookie("ssslab_session", path="/")
+    return {"user": updated}
+
+
 @app.get("/api/users")
 async def users(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
     return {"users": await asyncio.to_thread(auth.list_users)}
@@ -3089,7 +3432,7 @@ async def traffic_anomaly_status(
     limit: int = Query(default=50, ge=1, le=200),
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
-    allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    allowed = _readable_device_scope(user)
     result = await asyncio.to_thread(traffic_anomalies.list_actions, allowed_devices=allowed, limit=limit)
     settings_payload = await asyncio.to_thread(traffic_anomalies.get_settings)
     if user.get("role") != "admin":
@@ -3418,7 +3761,7 @@ def _connection_statistics(
 ) -> dict[str, Any]:
     now = int(time.time())
     start = now - CONNECTION_HISTORY_RANGES[range_key]
-    allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    allowed = _readable_device_scope(user)
     scope_conditions = ["last_seen_at >= ?"]
     scope_parameters: list[Any] = [start]
     if INFRASTRUCTURE_SOURCE_IPS:
@@ -3505,6 +3848,7 @@ def _connection_statistics(
                 "ruleSourceLabel": rule_match["sourceLabel"],
                 "ruleDetail": rule_match["detail"],
                 "chain": chain or ["DIRECT"],
+                "node": str(active_row.get("node")) if active_row and active_row.get("node") else _runtime_exit_name(chain),
                 "startedAt": started_at,
                 "lastSeenAt": int(row["last_seen_at"] or started_at),
                 "endedAt": ended_at,
@@ -3544,16 +3888,19 @@ def _traffic_ledger(
     offset: int,
     group_mode: str = "device-target",
     visibility: str = "significant",
+    target: str = "",
 ) -> dict[str, Any]:
     """Return target-level spend evidence, with connection detail available on demand."""
     now = int(time.time())
     start = _calendar_start("month", now) if range_key == "month" else now - TRAFFIC_LEDGER_RANGES[range_key]
-    allowed = None if user.get("role") == "admin" else set(user.get("allowedDevices") or [])
+    allowed = _readable_device_scope(user)
     minimum_group_traffic = (
         TRAFFIC_LEDGER_SIGNIFICANT_BYTES
         if group_mode != "connection" and visibility == "significant"
         else 0
     )
+    target_expression = "CASE WHEN trim(host) <> '' THEN lower(rtrim(trim(host), '.')) ELSE trim(destination_ip) END"
+    route_expression = "CASE WHEN instr(chain, 'DIRECT') > 0 THEN 'direct' ELSE 'proxy' END"
     conditions = ["last_seen_at >= ?"]
     parameters: list[Any] = [start]
     if route == "proxy":
@@ -3589,10 +3936,12 @@ def _traffic_ledger(
             "OR lower(rule) LIKE ? OR lower(chain) LIKE ?)"
         )
         parameters.extend([pattern] * 5)
+    if target:
+        normalized_target = target.strip().rstrip(".").casefold()
+        conditions.append(f"{target_expression} = ?")
+        parameters.append(normalized_target)
     where = " AND ".join(conditions)
     connection_ordering = "upload_bytes + download_bytes DESC, last_seen_at DESC" if order == "traffic" else "last_seen_at DESC, upload_bytes + download_bytes DESC"
-    target_expression = "CASE WHEN trim(host) <> '' THEN lower(rtrim(trim(host), '.')) ELSE trim(destination_ip) END"
-    route_expression = "CASE WHEN instr(chain, 'DIRECT') > 0 THEN 'direct' ELSE 'proxy' END"
     with _db() as connection:
         summary = connection.execute(
             f"""
@@ -3740,8 +4089,11 @@ def _traffic_ledger(
                 "ruleSourceLabel": rule_match["sourceLabel"],
                 "ruleDetail": rule_match["detail"],
                 "chain": chain,
-                "policy": policy,
-                "node": node,
+                "policyId": policy,
+                "nodeId": node,
+                "policy": _display_name(policy),
+                "node": _display_node_name(node),
+                "targetKey": str(row["target_key"] or ""),
                 "startedAt": started_at,
                 "lastSeenAt": last_seen_at,
                 "endedAt": ended_at,
@@ -3800,12 +4152,14 @@ async def traffic_ledger(
     visibility: str = Query(default="significant", pattern="^(significant|all)$"),
     device: str = Query(default="", max_length=80),
     query: str = Query(default="", max_length=120),
+    target: str = Query(default="", max_length=253),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     return await asyncio.to_thread(
-        _traffic_ledger, user, range, route, order, device.strip(), query.strip(), limit, offset, group, visibility
+        _traffic_ledger, user, range, route, order, device.strip(), query.strip(), limit, offset, group, visibility,
+        target.strip(),
     )
 
 
@@ -3835,12 +4189,10 @@ async def close_connection(connection_id: str, admin: dict[str, Any] = Depends(a
 
 
 @app.get("/api/device-aliases")
-async def device_aliases(user: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+async def device_aliases(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    # The route is admin-only, so a per-viewer subset branch would be dead code.
     aliases = {address: label for address, label in _aliases().items() if not _is_infrastructure_source(address)}
-    if user.get("role") != "admin":
-        allowed = set(user.get("allowedDevices") or [])
-        aliases = {address: label for address, label in aliases.items() if address in allowed}
-    return {"aliases": aliases, "devices": await asyncio.to_thread(_known_devices, user)}
+    return {"aliases": aliases, "devices": await asyncio.to_thread(_known_devices, admin)}
 
 
 @app.get("/api/gateway/runtime")
@@ -3896,12 +4248,10 @@ async def audit_query(
     if chain:
         conditions.append("chain = ?")
         values.append(chain)
-    allowed = user.get("allowedDevices") or []
-    if user["role"] != "admin":
-        if not allowed:
-            return {"timeline": [], "devices": [], "chains": []}
+    allowed = _readable_device_scope(user)
+    if allowed is not None:
         conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
-        values.extend(allowed)
+        values.extend(sorted(allowed))
     where = " AND ".join(conditions)
     with _db() as connection:
         timeline_rows = connection.execute(
@@ -3917,7 +4267,7 @@ async def audit_query(
             values,
         ).fetchall()
     return {
-        "timeline": [{"time": _display_datetime(row["minute"]).isoformat(), "up": row["up"] / 60, "down": row["down"] / 60} for row in timeline_rows],
+        "timeline": [{"time": _display_datetime(row["minute"]).isoformat(), "up": int(row["up"] or 0), "down": int(row["down"] or 0)} for row in timeline_rows],
         "devices": [dict(row) for row in device_rows if not _is_infrastructure_source(str(row["device"]))],
         "chains": [dict(row) for row in chain_rows],
     }
@@ -3943,8 +4293,8 @@ async def traffic_analysis(
     use_daily = range == "month"
     if not use_daily and seconds > settings.retention_days * 86400:
         raise HTTPException(status_code=422, detail=f"当前审计数据仅保留 {settings.retention_days} 天")
-    allowed = set(user.get("allowedDevices") or [])
-    if user["role"] != "admin" and device and device not in allowed:
+    allowed = _readable_device_scope(user)
+    if allowed is not None and device and device not in allowed:
         raise HTTPException(status_code=404, detail="设备不存在或无权查看")
     time_column = "day_start" if use_daily else "ts"
     source_table = "traffic_detail_daily_rollups" if use_daily else "traffic_detail_samples"
@@ -3953,9 +4303,7 @@ async def traffic_analysis(
     if device:
         conditions.append("device = ?")
         values.append(device)
-    elif user["role"] != "admin":
-        if not allowed:
-            return {"range": range, "groupBy": groupBy, "metric": metric, "totals": {"up": 0, "down": 0, "traffic": 0, "connections": 0}, "items": [], "generatedAt": int(time.time())}
+    elif allowed is not None:
         conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
         values.extend(sorted(allowed))
     where = " AND ".join(conditions)
@@ -3980,12 +4328,9 @@ async def traffic_analysis(
         if device:
             total_conditions.append("device = ?")
             total_values.append(device)
-        elif user["role"] != "admin":
-            if not allowed:
-                total_conditions.append("1 = 0")
-            else:
-                total_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
-                total_values.extend(sorted(allowed))
+        elif allowed is not None:
+            total_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
+            total_values.extend(sorted(allowed))
         total_where = " AND ".join(total_conditions)
         total_row = connection.execute(
             f"SELECT COALESCE(SUM(up_bytes),0) up,COALESCE(SUM(down_bytes),0) down FROM {total_table} WHERE {total_where}",
@@ -3999,12 +4344,9 @@ async def traffic_analysis(
         if device:
             class_conditions.append("device = ?")
             class_values.append(device)
-        elif user["role"] != "admin":
-            if not allowed:
-                class_conditions.append("1 = 0")
-            else:
-                class_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
-                class_values.extend(sorted(allowed))
+        elif allowed is not None:
+            class_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
+            class_values.extend(sorted(allowed))
         class_rows = connection.execute(
             f"SELECT {class_expression} route_class,COALESCE(SUM(up_bytes),0) up,COALESCE(SUM(down_bytes),0) down FROM {class_table} WHERE {' AND '.join(class_conditions)} GROUP BY {class_expression}",
             class_values,
@@ -4054,18 +4396,16 @@ async def traffic_analysis(
             bucket_expr = attr_time
         else:
             attr_table, attr_time, attr_start = "traffic_detail_daily_rollups", "day_start", _calendar_start("year", now) - 32 * 86400
-            bucket_expr = f"strftime('%Y-%m', {attr_time}, 'unixepoch', '+8 hours')"
+            offset_seconds = int(_display_datetime().utcoffset().total_seconds())
+            bucket_expr = f"strftime('%Y-%m', {attr_time}, 'unixepoch', '{offset_seconds:+d} seconds')"
         attr_conditions = [f"{attr_time} >= ?", "service = ?", "exit_mode = 'proxy'"]
         attr_values: list[Any] = [attr_start, selected_service]
         if device:
             attr_conditions.append("device = ?")
             attr_values.append(device)
-        elif user["role"] != "admin":
-            if not allowed:
-                attr_conditions.append("1 = 0")
-            else:
-                attr_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
-                attr_values.extend(sorted(allowed))
+        elif allowed is not None:
+            attr_conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
+            attr_values.extend(sorted(allowed))
         with _db() as connection:
             attr_rows = connection.execute(
                 f"SELECT {bucket_expr} bucket,device,SUM(up_bytes + down_bytes) total FROM {attr_table} WHERE {' AND '.join(attr_conditions)} GROUP BY bucket,device ORDER BY bucket",
@@ -4123,12 +4463,10 @@ async def traffic_analysis(
 
 @app.get("/api/traffic-history")
 async def traffic_history(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
-    allowed = set(user.get("allowedDevices") or [])
+    allowed = _readable_device_scope(user)
     conditions: list[str] = []
     values: list[Any] = []
-    if user["role"] != "admin":
-        if not allowed:
-            return {"currentMonth": 0, "previousMonth": 0, "currentYear": 0, "previousYear": 0, "recordedTotal": 0, "months": [], "years": []}
+    if allowed is not None:
         conditions.append(f"device IN ({','.join('?' for _ in allowed)})")
         values.extend(sorted(allowed))
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -4289,8 +4627,8 @@ async def device_sessions(
     limit: int = Query(default=200, ge=1, le=1000),
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
-    allowed = set(user.get("allowedDevices") or [])
-    if _is_infrastructure_source(device_ip) or (user["role"] != "admin" and device_ip not in allowed):
+    allowed = _readable_device_scope(user)
+    if _is_infrastructure_source(device_ip) or (allowed is not None and device_ip not in allowed):
         raise HTTPException(status_code=404, detail="设备不存在或无权查看")
     started_at, _, _, _ = _range_window(range)
     with _db() as connection:
@@ -4304,17 +4642,24 @@ async def device_sessions(
             """,
             (device_ip, started_at, limit),
         ).fetchall()
+    sessions = []
+    for row in rows:
+        try:
+            decoded_chain = json.loads(str(row["chain"] or "[]"))
+        except (json.JSONDecodeError, TypeError):
+            decoded_chain = [str(row["chain"] or "")]
+        chain = [str(item) for item in decoded_chain] if isinstance(decoded_chain, list) else [str(decoded_chain)]
+        sessions.append(
+            {
+                **dict(row),
+                "chain": chain,
+                "traffic": int(row["upload_bytes"] or 0) + int(row["download_bytes"] or 0),
+            }
+        )
     return {
         "device": device_ip,
         "range": range,
-        "sessions": [
-            {
-                **dict(row),
-                "chain": json.loads(row["chain"] or "[]"),
-                "traffic": int(row["upload_bytes"] or 0) + int(row["download_bytes"] or 0),
-            }
-            for row in rows
-        ],
+        "sessions": sessions,
     }
 
 
@@ -4349,7 +4694,7 @@ async def select_strategy(group_name: str, request: StrategySelectRequest, user:
     group_type = str(group.get("type") or "")
     if group_type != "Selector":
         mode = {"LoadBalance": "自动均衡", "URLTest": "自动测速", "Fallback": "故障转移"}.get(group_type, "自动")
-        raise HTTPException(status_code=409, detail=f"{_clean_name(group_name)}是{mode}组，由 mihomo 自动选择节点，不能手动切换")
+        raise HTTPException(status_code=409, detail=f"{_display_name(group_name)}是{mode}组，由 mihomo 自动选择节点，不能手动切换")
     members = [str(item) for item in (group.get("all") or [])]
     if request.name not in members:
         raise HTTPException(status_code=422, detail="目标节点不属于该策略组，请刷新页面后重试")
@@ -4372,10 +4717,91 @@ async def select_strategy(group_name: str, request: StrategySelectRequest, user:
         "info",
         "strategy",
         "策略已切换",
-        f"{_clean_name(group_name)} 现在指向 {_clean_name(request.name)}",
+        f"{_display_name(group_name)} 现在指向 {_display_name(request.name)}",
         {"group": group_name, "selected": request.name, "closedConnections": closed},
     )
     return {"ok": True, "group": group_name, "selected": request.name, "reconnect": request.reconnect, "affectedConnections": len(affected_ids), "closedConnections": closed, "closeFailures": failed, "snapshotAvailable": snapshot_available, "elapsedMs": round((time.monotonic() - started) * 1000)}
+
+
+@app.post("/api/strategies/test-delay")
+async def test_strategy_delays(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    """Re-run the delay test for every strategy group and return the refreshed payload."""
+    try:
+        payload = await mihomo.get("/proxies")
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="mihomo 策略接口当前不可用") from exc
+    groups = [name for name, data in (payload.get("proxies") or {}).items() if isinstance(data.get("all"), list)]
+    if not groups:
+        return {"ok": True, "tested": 0, "updated": 0, "elapsedMs": 0, "strategies": await strategy_payload()}
+    semaphore = asyncio.Semaphore(6)
+
+    async def test_one(name: str) -> tuple[str, int | None]:
+        async with semaphore:
+            try:
+                return name, await mihomo.test_delay(name, DELIVERY_TEST_URL)
+            except httpx.HTTPError:
+                return name, None
+
+    started = time.monotonic()
+    results = await asyncio.gather(*(test_one(name) for name in groups))
+    updated = sum(1 for _, delay in results if delay)
+    try:
+        fresh = await strategy_payload()
+    except httpx.HTTPError:
+        fresh = None
+    return {
+        "ok": True,
+        "tested": len(groups),
+        "updated": updated,
+        "elapsedMs": round((time.monotonic() - started) * 1000),
+        "strategies": fresh,
+    }
+
+
+@app.get("/api/github-sync")
+async def github_sync_config(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    return await asyncio.to_thread(github_sync.get)
+
+
+@app.put("/api/github-sync")
+async def update_github_sync_config(request: GitHubSyncRequest, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(github_sync.update, request.repo, request.branch, request.path, request.token)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/github-sync/push")
+async def github_sync_push(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        rules = await asyncio.to_thread(rule_workspace.custom_rules_snapshot)
+        return await github_sync.push(rules)
+    except ValueError as exc:
+        await asyncio.to_thread(github_sync.record_error, str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        await asyncio.to_thread(github_sync.record_error, f"GitHub API 返回 {exc.response.status_code}")
+        raise HTTPException(status_code=502, detail=f"GitHub API 返回 {exc.response.status_code}") from exc
+    except httpx.HTTPError as exc:
+        await asyncio.to_thread(github_sync.record_error, "GitHub API 暂时无法访问")
+        raise HTTPException(status_code=502, detail="GitHub API 暂时无法访问") from exc
+
+
+@app.post("/api/github-sync/pull")
+async def github_sync_pull(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        rules = await github_sync.pull()
+        result = await asyncio.to_thread(rule_workspace.replace_custom_rules, rules)
+        return {"ok": True, **result}
+    except ValueError as exc:
+        await asyncio.to_thread(github_sync.record_error, str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        await asyncio.to_thread(github_sync.record_error, f"GitHub API 返回 {exc.response.status_code}")
+        raise HTTPException(status_code=502, detail=f"GitHub API 返回 {exc.response.status_code}") from exc
+    except httpx.HTTPError as exc:
+        await asyncio.to_thread(github_sync.record_error, "GitHub API 暂时无法访问")
+        raise HTTPException(status_code=502, detail="GitHub API 暂时无法访问") from exc
 
 
 @app.get("/api/rules/workspace")
@@ -4485,14 +4911,25 @@ async def apply_rules(admin: dict[str, Any] = Depends(admin_user)) -> dict[str, 
         raise HTTPException(status_code=502, detail="mihomo 拒绝了新规则配置，现有配置保持不变") from exc
 
 
+def _spa_fallback(full_path: str, static_dir: Path) -> FileResponse:
+    """Serve static assets and the app shell, but never mask a mistyped API path.
+
+    The SPA route is a catch-all, so an unknown ``/api/...`` path would
+    otherwise be answered with 200 + index.html, hiding real client errors.
+    """
+    if full_path == "api" or full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="接口不存在")
+    candidate = (static_dir / full_path).resolve()
+    if full_path and candidate.is_relative_to(static_dir.resolve()) and candidate.is_file():
+        return FileResponse(candidate)
+    return FileResponse(static_dir / "index.html")
+
+
 if settings.static_dir.exists():
     assets = settings.static_dir / "assets"
     if assets.exists():
         app.mount("/assets", StaticFiles(directory=assets), name="assets")
 
     @app.get("/{full_path:path}")
-    async def spa(full_path: str, request: Request) -> FileResponse:
-        candidate = (settings.static_dir / full_path).resolve()
-        if full_path and candidate.is_relative_to(settings.static_dir.resolve()) and candidate.is_file():
-            return FileResponse(candidate)
-        return FileResponse(settings.static_dir / "index.html")
+    async def spa(full_path: str) -> FileResponse:
+        return _spa_fallback(full_path, settings.static_dir)

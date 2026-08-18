@@ -22,7 +22,8 @@ import {
   YAxis,
 } from "recharts";
 import { api } from "../../api";
-import { bucketDuration, bytes, rate } from "../../lib/formatters";
+import { connectionExitNode } from "../../lib/connections";
+import { bytes, rate } from "../../lib/formatters";
 
 function StatCard({ icon: Icon, label, value, tone }) {
   return (
@@ -89,11 +90,11 @@ function DeviceRanking({ devices, onSelect }) {
     <section className="panel device-ranking">
       <div className="panel-heading"><h2>设备流量排行</h2><button className="text-button">查看全部</button></div>
       <div className="ranking-list">
-        {devices.slice(0, 5).map((device, index) => (
+        {devices.slice(0, 12).map((device, index) => (
           <button key={device.ip} className="ranking-row" onClick={() => onSelect(device)}>
             <span className="rank">{index + 1}</span>
             <span className="device-avatar"><HardDrives /></span>
-            <span className="device-copy"><strong>{device.name}</strong><small>{device.ip}</small><i style={{ width: `${Math.max(8, device.total / max * 100)}%` }} /></span>
+            <span className="device-copy"><strong>{device.name}</strong><small>{device.ip}</small><span className="device-wide-meta">{device.active || 0} 条连接 · ↑ {rate(device.up || 0)}</span><i style={{ width: `${Math.max(8, device.total / max * 100)}%` }} /></span>
             <span className="device-rate"><strong>{rate(device.down)}</strong><small>↓ {bytes(device.total)}</small></span>
           </button>
         ))}
@@ -114,7 +115,7 @@ function ChainUsage({ chains }) {
           </ResponsiveContainer>
           <div className="donut-center"><strong>{bytes(chains.reduce((sum, c) => sum + c.value, 0))}</strong><span>合计</span></div>
         </div>
-        <div className="legend-list">{chains.map((chain, i) => <div key={chain.name}><span className="legend-dot" style={{ background: colors[i % colors.length] }} /><strong>{chain.name}</strong><small>{chain.percent}%</small></div>)}</div>
+        <div className="legend-list">{chains.map((chain, i) => <div key={chain.name}><span className="legend-dot" style={{ background: colors[i % colors.length] }} /><strong>{chain.name}</strong><span className="legend-value">{bytes(chain.value)}</span><small>{chain.percent}%</small></div>)}</div>
       </div>
     </section>
   );
@@ -131,19 +132,19 @@ function ConnectionTable({ connections, onDevice, onSelect, onContext, dense = f
   return (
     <div className={`connection-table-wrap ${dense ? "dense" : ""} ${operational ? "operational" : ""}`} data-testid={operational ? "connections-scroll" : undefined}>
       <table className="connection-table">
-        <thead><tr><th>设备</th><th>目标</th><th>协议</th><th>命中规则</th><th>策略链路</th><th className="numeric">上行速率</th><th className="numeric">下行速率</th><th className="numeric">累计流量</th><th>持续时间</th></tr></thead>
+        <thead><tr><th className="column-device">设备</th><th className="column-target">目标</th><th className="column-protocol">协议</th><th className="column-rule">命中规则</th><th className="column-exit">出口节点</th><th className="numeric column-up-rate">上行速率</th><th className="numeric column-down-rate">下行速率</th><th className="numeric column-total">累计流量</th><th className="column-time">持续时间</th></tr></thead>
         <tbody>
           {connections.map((connection) => { const protocol = connectionProtocol(connection); const moving = connection.upRate + connection.downRate > 0; return (
             <tr key={connection.id} className={moving ? "is-moving" : "is-idle"} onClick={() => onSelect ? onSelect(connection) : onDevice?.({ name: connection.device, ip: connection.sourceIP })} onContextMenu={(event) => { if (!onContext) return; event.preventDefault(); onContext(event, connection); }}>
-              <td><span className="connection-device"><i /> <span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></span></td>
-              <td><strong>{connection.host || connection.destinationIP}</strong><small>{connection.destinationIP}:{connection.destinationPort}</small></td>
-              <td><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></td>
-              <td>{connection.rule}</td>
-              <td><div className="chain-text">{connection.chain.map((item, i) => <span key={`${item}-${i}`}>{item}</span>)}</div></td>
-              <td className="numeric up">{rate(connection.upRate)}</td>
-              <td className="numeric down">{rate(connection.downRate)}</td>
-              <td className="numeric cumulative">{bytes((connection.upload || 0) + (connection.download || 0))}</td>
-              <td>{connection.duration}</td>
+              <td className="column-device"><span className="connection-device"><i /> <span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></span></td>
+              <td className="column-target"><strong>{connection.host || connection.destinationIP}</strong><small>{connection.destinationIP}:{connection.destinationPort}</small></td>
+              <td className="column-protocol"><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></td>
+              <td className="column-rule">{connection.rule}</td>
+              <td className="column-exit"><span className="connection-exit-node" title={connectionExitNode(connection)}>{connectionExitNode(connection)}</span></td>
+              <td className="numeric up column-up-rate">{rate(connection.upRate)}</td>
+              <td className="numeric down column-down-rate">{rate(connection.downRate)}</td>
+              <td className="numeric cumulative column-total">{bytes((connection.upload || 0) + (connection.download || 0))}</td>
+              <td className="column-time">{connection.duration}</td>
             </tr>
           ); })}
         </tbody>
@@ -152,10 +153,40 @@ function ConnectionTable({ connections, onDevice, onSelect, onContext, dense = f
   );
 }
 
+function DashboardMobileConnections({ connections, onDevice }) {
+  return (
+    <div className="dashboard-mobile-connections" aria-label="当前活跃连接">
+      {connections.length ? connections.map((connection) => {
+        const protocol = connectionProtocol(connection);
+        const target = connection.host || connection.destinationIP;
+        const exit = connectionExitNode(connection);
+        const total = (connection.upload || 0) + (connection.download || 0);
+        return (
+          <button
+            type="button"
+            className="dashboard-mobile-connection"
+            key={connection.id}
+            onClick={() => onDevice?.({ name: connection.device, ip: connection.sourceIP })}
+            aria-label={`${connection.device} 访问 ${target}，累计 ${bytes(total)}，出口 ${exit}`}
+          >
+            <span className="dashboard-mobile-target">
+              <strong>{target}</strong>
+              <span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span>
+            </span>
+            <strong className="dashboard-mobile-traffic">{bytes(total)}</strong>
+            <span className="dashboard-mobile-device"><HardDrives />{connection.device}</span>
+            <span className="dashboard-mobile-exit" title={exit}>{exit}</span>
+          </button>
+        );
+      }) : <div className="dashboard-mobile-connections-empty">当前没有活跃连接</div>}
+    </div>
+  );
+}
+
 function ConnectionStatisticsTable({ connections, onSelect, onContext, dense = false }) {
   return <div className={`connection-table-wrap operational statistics-table-wrap ${dense ? "dense" : ""}`} data-testid="connections-scroll">
     <table className="connection-table statistics-table">
-      <thead><tr><th>状态</th><th>设备</th><th>目标</th><th>协议</th><th>命中规则</th><th>策略链路</th><th className="numeric">上传</th><th className="numeric">下载</th><th className="numeric">总流量</th><th>连接时间</th></tr></thead>
+      <thead><tr><th>状态</th><th>设备</th><th>目标</th><th>协议</th><th>命中规则</th><th>出口节点</th><th className="numeric">上传</th><th className="numeric">下载</th><th className="numeric">总流量</th><th>连接时间</th></tr></thead>
       <tbody>{connections.length ? connections.map(connection => {
         const protocol = connectionProtocol(connection);
         const active = connection.status === "active";
@@ -165,7 +196,7 @@ function ConnectionStatisticsTable({ connections, onSelect, onContext, dense = f
           <td><strong>{connection.host || connection.destinationIP}</strong><small>{connection.destinationIP}:{connection.destinationPort}</small></td>
           <td><span className={`protocol protocol-${protocol.toLowerCase()}`}>{protocol}</span></td>
           <td>{connection.rule}</td>
-          <td><div className="chain-text">{connection.chain.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}</div></td>
+          <td><span className="connection-exit-node" title={connectionExitNode(connection)}>{connectionExitNode(connection)}</span></td>
           <td className="numeric up">{bytes(connection.upload)}</td>
           <td className="numeric down">{bytes(connection.download)}</td>
           <td className="numeric cumulative">{bytes((connection.upload || 0) + (connection.download || 0))}</td>
@@ -189,7 +220,7 @@ function ConnectionMobileList({ connections, onSelect, onContext }) {
         </header>
         <div className="connection-mobile-target"><strong>{connection.host || connection.destinationIP}</strong><span>{connection.destinationIP}:{connection.destinationPort}</span></div>
         <div className="connection-mobile-source"><Desktop /><span><strong>{connection.device}</strong><small>{connection.sourceIP}</small></span></div>
-        <div className="connection-mobile-chain">{connection.chain.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}</div>
+        <div className="connection-mobile-exit"><small>出口节点</small><strong title={connectionExitNode(connection)}>{connectionExitNode(connection)}</strong></div>
         <footer><span><small>总流量</small><strong>{bytes((connection.upload || 0) + (connection.download || 0))}</strong></span><span><small>上传 / 下载</small><strong>{bytes(connection.upload)} / {bytes(connection.download)}</strong></span><span><small>{active ? "持续时间" : "结束时间"}</small><strong>{active ? connectionDuration(connection.durationSeconds) : connectionTime(connection.endedAt)}</strong></span></footer>
       </article>;
     }) : <div className="connection-mobile-empty">当前筛选条件下没有连接记录</div>}
@@ -246,20 +277,33 @@ function QuickRuleModal({ editor, setEditor, onSave }) {
   </form></div>;
 }
 
+const STRATEGY_FLAGS = [
+  ["美国", "🇺🇸"], ["香港", "🇭🇰"], ["日本", "🇯🇵"], ["台湾", "🇹🇼"],
+  ["新加坡", "🇸🇬"], ["狮城", "🇸🇬"], ["英国", "🇬🇧"],
+];
+
+function strategyDisplayName(value) {
+  const label = String(value || "");
+  if (!label || /[\p{Extended_Pictographic}\p{Regional_Indicator}]/u.test(label) || label === "DIRECT") return label;
+  if (label === "节点选择") return `🚀 ${label}`;
+  if (label === "手动选择" || label === "手动切换") return `🔧 ${label}`;
+  const region = STRATEGY_FLAGS.find(([keyword]) => label.includes(keyword));
+  return region ? `${region[1]} ${label}` : label;
+}
+
 function StrategySummary({ strategies, onOpen }) {
   return (
     <section className="panel strategy-summary">
       <div className="panel-heading"><h2>常用策略</h2><button className="text-button" onClick={onOpen}>管理策略</button></div>
       <div className="strategy-list">
-        {strategies.primary.slice(0, 5).map((group, index) => (
+        {strategies.primary.slice(0, 12).map((group, index) => (
           <div className="strategy-row" key={group.name}>
             <span className="strategy-index">{index + 1}</span>
-            <div><strong>{group.name}</strong></div>
-            <span className="strategy-now">{group.now}</span>
+            <div><strong>{strategyDisplayName(group.name)}</strong><small className="strategy-wide-meta">{group.typeLabel || group.modeLabel || group.type || "策略组"}{group.delay ? ` · ${group.delay}` : ""}</small></div>
+            <span className="strategy-now">{strategyDisplayName(group.now)}</span>
           </div>
         ))}
       </div>
-      <button className="secondary-strategies">其他规则策略 <span>{strategies.secondaryCount}</span><CaretDown /></button>
     </section>
   );
 }
@@ -269,6 +313,12 @@ export function Dashboard({ data, strategies, onDevice, onNavigate, canManage })
   const [rangeData, setRangeData] = useState(null);
   const [rangeLoading, setRangeLoading] = useState(false);
   useEffect(() => {
+    // The live range is already refreshed by the parent's 3s live subscription;
+    // polling the same endpoint here would only add a second stale request.
+    if (range === "live") {
+      setRangeData(null);
+      return undefined;
+    }
     let active = true;
     let timer;
     setRangeData(null);
@@ -285,30 +335,31 @@ export function Dashboard({ data, strategies, onDevice, onNavigate, canManage })
   const chartSource = rangeData || (data.timelineRange === range ? data : null);
   const chartTimeline = chartSource?.timeline || [];
   const rangeLabel = DASHBOARD_RANGES.find(([key]) => key === range)?.[1] || "实时";
-  const rangeCopy = range === "month" ? "本月" : `最近 ${rangeLabel}`;
   const trafficSummary = chartSource?.timelineSummary || { up: 0, down: 0, traffic: 0 };
-  const bucketCopy = bucketDuration(chartSource?.timelineBucketSeconds || 0);
   return (
     <div className="dashboard page-content">
       <div className="stats-grid">
-        <StatCard icon={CheckCircle} label="网关状态" value={data.status.online ? "运行正常" : "连接中断"} tone="green" />
-        <StatCard icon={Pulse} label="活跃连接" value={data.totals.active.toLocaleString()} tone="blue" />
-        <StatCard icon={CloudArrowDown} label="实时带宽" value={`↓ ${rate(data.totals.downRate)}`} tone="violet" />
-        <StatCard icon={ChartDonut} label="本月流量" value={bytes(data.totals.month ?? data.totals.today)} tone="orange" />
+        <StatCard icon={CheckCircle} label="状态" value={data.status.online ? "运行正常" : "连接中断"} tone="green" />
+        <StatCard icon={Pulse} label="连接" value={data.totals.active.toLocaleString()} tone="blue" />
+        <StatCard icon={CloudArrowDown} label="速率" value={`↓ ${rate(data.totals.downRate)}`} tone="violet" />
+        <StatCard icon={ChartDonut} label="流量" value={bytes(data.totals.month ?? data.totals.today)} tone="orange" />
       </div>
-      <section className="panel throughput-panel">
-        <div className="panel-heading throughput-heading"><div><h2>流量趋势</h2><p>{rangeCopy} · 每 {bucketCopy} 实际消耗流量</p></div><DashboardFilters range={range} setRange={setRange} loading={rangeLoading} /></div>
-        <div className="traffic-totals"><span className="traffic-total down"><i />下载<strong>{bytes(trafficSummary.down)}</strong></span><span className="traffic-total up"><i />上传<strong>{bytes(trafficSummary.up)}</strong></span><span className="traffic-total combined">合计<strong>{bytes(trafficSummary.traffic)}</strong></span>{rangeLoading && <small>正在加载…</small>}</div>
-        <div className="throughput-chart"><TrafficChart data={chartTimeline} /></div>
-      </section>
+      <div className="dashboard-charts">
+        <section className="panel throughput-panel">
+          <div className="panel-heading throughput-heading"><h2>流量</h2><DashboardFilters range={range} setRange={setRange} loading={rangeLoading} /></div>
+          <div className="traffic-totals"><span className="traffic-total down"><i />下载<strong>{bytes(trafficSummary.down)}</strong></span><span className="traffic-total up"><i />上传<strong>{bytes(trafficSummary.up)}</strong></span><span className="traffic-total combined">合计<strong>{bytes(trafficSummary.traffic)}</strong></span>{rangeLoading && <small>正在加载…</small>}</div>
+          <div className="throughput-chart"><TrafficChart data={chartTimeline} /></div>
+        </section>
+        <ChainUsage chains={data.chains} />
+      </div>
       <div className={`dashboard-columns ${canManage ? "" : "viewer-columns"}`}>
         <DeviceRanking devices={data.devices} onSelect={onDevice} />
-        <ChainUsage chains={data.chains} />
         {canManage && <StrategySummary strategies={strategies} onOpen={() => onNavigate("strategies")} />}
       </div>
       <section className="panel live-panel">
         <div className="panel-heading"><h2>当前活跃连接</h2><button className="text-button" onClick={() => onNavigate("connections")}>查看连接统计</button></div>
-        <ConnectionTable connections={data.connections.slice(0, 6)} onDevice={onDevice} dense />
+        <ConnectionTable connections={data.connections.slice(0, 16)} onDevice={onDevice} dense />
+        <DashboardMobileConnections connections={data.connections.slice(0, 8)} onDevice={onDevice} />
       </section>
     </div>
   );

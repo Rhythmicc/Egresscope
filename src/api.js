@@ -24,6 +24,13 @@ const request = async (path, options = {}) => {
       const body = await response.json().catch(() => ({}));
       const error = new Error(body.detail || `请求失败（${response.status}）`);
       error.status = response.status;
+      if (
+        response.status === 401
+        && !path.startsWith("/api/auth/login")
+        && !path.startsWith("/api/auth/change-password")
+      ) {
+        window.dispatchEvent(new CustomEvent("egresscope:unauthorized"));
+      }
       throw error;
     }
     return response.json();
@@ -43,6 +50,7 @@ export const api = {
   session: () => request("/api/auth/session"),
   login: (username, password) => request("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
   logout: () => request("/api/auth/logout", { method: "POST" }),
+  changePassword: (currentPassword, newPassword) => request("/api/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }),
   users: () => request("/api/users"),
   createUser: (payload) => request("/api/users", { method: "POST", body: JSON.stringify(payload) }),
   updateUser: (id, payload) => request(`/api/users/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
@@ -68,6 +76,15 @@ export const api = {
   dashboard: (range = "live") => request(`/api/dashboard?range=${encodeURIComponent(range)}`),
   strategies: () => request("/api/strategies"),
   selectStrategy: (group, name, reconnect = true) => request(`/api/strategies/${encodeURIComponent(group)}`, { method: "PUT", body: JSON.stringify({ name, reconnect }) }),
+  testStrategyDelays: () => request("/api/strategies/test-delay", {
+    method: "POST",
+    timeoutMs: 120_000,
+    timeoutMessage: "策略测速等待超时，请稍后重试",
+  }),
+  githubSync: () => request("/api/github-sync"),
+  saveGithubSync: (payload) => request("/api/github-sync", { method: "PUT", body: JSON.stringify(payload) }),
+  githubSyncPush: () => request("/api/github-sync/push", { method: "POST" }),
+  githubSyncPull: () => request("/api/github-sync/pull", { method: "POST" }),
   ruleWorkspace: () => request("/api/rules/workspace"),
   resetRules: () => request("/api/rules/reset", { method: "POST" }),
   applyRules: () => request("/api/rules/apply", { method: "POST" }),
@@ -99,10 +116,11 @@ export const api = {
     if (attributionPeriod) query.set("attributionPeriod", attributionPeriod);
     return request(`/api/traffic-analysis?${query}`);
   },
-  trafficLedger: ({ range, route = "proxy", order = "traffic", group = "device-target", visibility = "significant", device = "", query = "", limit = 100, offset = 0 }) => {
+  trafficLedger: ({ range, route = "proxy", order = "traffic", group = "device-target", visibility = "significant", device = "", query = "", target = "", limit = 100, offset = 0 }) => {
     const search = new URLSearchParams({ range, route, order, group, visibility, limit: String(limit), offset: String(offset) });
     if (device) search.set("device", device);
     if (query) search.set("query", query);
+    if (target) search.set("target", target);
     return request(`/api/traffic-ledger?${search}`);
   },
   trafficHistory: () => request("/api/traffic-history"),
@@ -115,7 +133,7 @@ export const subscribeLive = (onData, onError = () => {}) => {
   let stopped = false;
   let timer;
   const poll = async () => {
-    try { onData(await api.dashboard()); } catch (error) { onError(error); }
+    try { const payload = await api.dashboard(); if (!stopped) onData(payload); } catch (error) { if (!stopped) onError(error); }
     if (!stopped) timer = setTimeout(poll, 3000);
   };
   timer = setTimeout(poll, 3000);

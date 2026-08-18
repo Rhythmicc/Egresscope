@@ -26,16 +26,7 @@ export const PAGE_MAP = [
   { id: "users", label: "用户管理", section: "manage", icon: Gear },
 ];
 
-export const PAGE_TITLES = {
-  dashboard: "状态概览",
-  connections: "连接统计",
-  audit: "流量分析",
-  strategies: "分流策略",
-  rules: "规则管理",
-  subscriptions: "订阅管理",
-  gateway: "网关设置",
-  users: "用户管理",
-};
+export const PAGE_TITLES = Object.fromEntries(PAGE_MAP.map(item => [item.id, item.label]));
 
 export const pageDefinition = page => PAGE_MAP.find(item => item.id === page);
 export const canOpenPage = (page, user) => user?.role === "admin" || Boolean(pageDefinition(page)?.viewer);

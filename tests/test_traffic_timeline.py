@@ -1,6 +1,6 @@
 import unittest
 
-from server.main import _exclusive_exit_usage, _traffic_summary, _traffic_timeline, _usage_flow
+from server.main import _display_name, _display_node_name, _exclusive_exit_usage, _traffic_summary, _traffic_timeline, _usage_flow
 
 
 class TrafficTimelineTests(unittest.TestCase):
@@ -66,6 +66,16 @@ class TrafficTimelineTests(unittest.TestCase):
         self.assertEqual(values, {"美国最佳": 700, "美国智能": 200, "DIRECT": 100, "历史未细分": 200})
         self.assertNotIn("节点选择", values)
         self.assertEqual(sum(values.values()), 1200)
+
+
+    def test_display_names_preserve_provider_emoji_and_infer_flags_for_plain_names(self):
+        self.assertEqual(_display_name("🇭🇰 香港 01"), "🇭🇰 香港 01")
+        self.assertEqual(_display_name("🔥 日本 01"), "🔥 日本 01")
+        self.assertEqual(_display_name("🇺🇸 洛杉矶 02 · 推荐"), "🇺🇸 洛杉矶 02 · 推荐")
+        self.assertEqual(_display_node_name("🇺🇸 洛杉矶 02"), "🇺🇸 洛杉矶 02")
+        self.assertEqual(_display_name("香港 01"), "🇭🇰 香港 01")
+        self.assertEqual(_display_name("节点选择"), "节点选择")
+        self.assertEqual(_display_name("IEPL-东京-03"), "IEPL-东京-03")
 
 
 if __name__ == "__main__":

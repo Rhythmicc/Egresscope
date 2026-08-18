@@ -35,6 +35,20 @@ class MihomoClient:
         response = await self.client.put(f"/proxies/{quote(group, safe='')}", json={"name": name})
         response.raise_for_status()
 
+    async def test_delay(self, name: str, url: str = "https://www.gstatic.com/generate_204", timeout_ms: int = 5000) -> int | None:
+        """Re-run the delay test for one proxy or group and return its reported delay."""
+        if not self.client:
+            raise RuntimeError("mihomo client is not started")
+        response = await self.client.get(
+            f"/proxies/{quote(name, safe='')}/delay",
+            params={"url": url, "timeout": timeout_ms},
+        )
+        response.raise_for_status()
+        try:
+            return int(response.json().get("delay") or 0) or None
+        except (ValueError, TypeError):
+            return None
+
     async def reload_config(self, payload: str) -> None:
         if not self.client:
             raise RuntimeError("mihomo client is not started")

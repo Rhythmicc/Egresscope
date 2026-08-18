@@ -10,6 +10,7 @@ from server.main import (
     _masked_subscription_url,
     _overlay_subscription_nodes,
     _parse_subscription,
+    _sanitized_subscription_error,
     _subscription_usage,
     _surge_delivery,
     _surge_scalar,
@@ -78,6 +79,15 @@ proxies:
     def test_masks_secret_url_and_parses_usage(self):
         self.assertEqual(_masked_subscription_url("https://example.com/sub?token=secret"), "https://example.com/••••")
         self.assertEqual(_subscription_usage("upload=1; download=2; total=3; expire=4"), {"upload": 1, "download": 2, "total": 3, "expire": 4})
+
+    def test_sanitizes_source_and_redirect_urls_before_truncation(self):
+        source = "https://user:password@example.com/sub?token=" + "secret" * 100
+        redirect = "https://downloads.example.net/profile?access_token=redirect-secret"
+        message = _sanitized_subscription_error(RuntimeError(f"request {source} redirected to {redirect}"), source)
+        self.assertNotIn("password", message)
+        self.assertNotIn("secret", message)
+        self.assertNotIn("access_token", message)
+        self.assertEqual(message, "request https://example.com/•••• redirected to https://downloads.example.net/••••")
 
     def test_generates_complete_clash_profile(self):
         nodes = [

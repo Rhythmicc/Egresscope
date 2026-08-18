@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server.database import LATEST_SCHEMA_VERSION, connect, migrate
-from server.main import RuleWorkspace, TrafficCollector, _connection_statistics, _gateway_events, _record_gateway_event, _traffic_ledger, rule_workspace, settings, traffic_analysis
+from server.main import RuleWorkspace, TrafficCollector, _calendar_start, _connection_statistics, _gateway_events, _record_gateway_event, _traffic_ledger, device_sessions, rule_workspace, settings, traffic_analysis
 
 
 class DatabaseMigrationTests(unittest.TestCase):
@@ -99,6 +99,74 @@ class DatabaseMigrationTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(tuple(row), ("OpenAI", "RULE-SET", "ssslab-example", "rule-set", "openai-rules", "OpenAI"))
 
+    def test_collector_restores_long_lived_connection_cursor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(settings, data_dir=data_dir)
+            now = 1_786_400_000
+            with connect(database) as connection:
+                migrate(connection)
+                connection.execute(
+                    "INSERT INTO connection_cursors(id,upload_bytes,download_bytes,seen_at) VALUES(?,?,?,?)",
+                    ("long-lived", 1234, 5678, now - 3600),
+                )
+            collector = TrafficCollector()
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now):
+                collector.initialize()
+            self.assertEqual(collector._previous_connections["long-lived"], (1234, 5678, float(now - 3600)))
+
+    def test_dashboard_reports_today_separately_from_month(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(settings, data_dir=data_dir, device_aliases_path=data_dir / "devices.json")
+            now = 1_786_610_000
+            today = _calendar_start("day", now)
+            yesterday = _calendar_start("day", today - 1)
+            with connect(database) as connection:
+                migrate(connection)
+                connection.executemany(
+                    "INSERT INTO traffic_daily_rollups VALUES(?,?,?,?,?,?,?)",
+                    (
+                        (yesterday, "192.168.31.42", "direct", 80, 120, 1, 1),
+                        (today, "192.168.31.42", "proxy", 100, 200, 1, 1),
+                    ),
+                )
+            collector = TrafficCollector()
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now), patch("server.main._config_group_order", return_value=[]):
+                result = collector.dashboard({"role": "admin", "allowedDevices": []})
+                global_viewer = collector.dashboard({"role": "viewer", "allowedDevices": []})
+                scoped_viewer = collector.dashboard({"role": "viewer", "allowedDevices": ["192.168.31.225"]})
+            self.assertEqual(result["totals"]["today"], 300)
+            self.assertEqual(result["totals"]["month"], 500)
+            self.assertEqual(result["totals"]["dayChange"], 50.0)
+            self.assertEqual(global_viewer["totals"]["month"], result["totals"]["month"])
+            self.assertEqual([row["ip"] for row in global_viewer["devices"]], ["192.168.31.42"])
+            self.assertEqual(scoped_viewer["totals"]["month"], 0)
+            self.assertEqual(scoped_viewer["devices"], [])
+
+    def test_device_sessions_normalizes_non_list_chain_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(settings, data_dir=data_dir)
+            now = 1_786_400_000
+            with connect(database) as connection:
+                migrate(connection)
+                connection.execute(
+                    """
+                    INSERT INTO connection_sessions(
+                        id,device,host,destination_ip,destination_port,network,rule,chain,
+                        started_at,last_seen_at,ended_at,upload_bytes,download_bytes
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    ("bad-chain", "192.168.31.42", "example.com", "1.1.1.1", "443", "tcp", "Match", '"美国最佳"', now - 10, now, None, 10, 20),
+                )
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now):
+                result = asyncio.run(device_sessions("192.168.31.42", "24h", 10, {"role": "admin", "allowedDevices": []}))
+            self.assertEqual(result["sessions"][0]["chain"], ["美国最佳"])
+
     def test_connection_statistics_keeps_history_for_thirty_days_and_scopes_viewers(self):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory)
@@ -130,9 +198,14 @@ class DatabaseMigrationTests(unittest.TestCase):
             collector = TrafficCollector()
             with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now):
                 result = _connection_statistics({"role": "viewer", "allowedDevices": ["192.168.31.42"]}, "30d", "all", 100, 0)
+                global_viewer = _connection_statistics({"role": "viewer", "allowedDevices": []}, "30d", "all", 100, 0)
                 collector._persist(now, 0, 0, 10, [], [], [], [], (0, 0))
             self.assertEqual([row["id"] for row in result["sessions"]], ["active", "recent"])
+            self.assertEqual([row["node"] for row in result["sessions"]], ["美国最佳", "美国最佳"])
             self.assertEqual(result["summary"], {"active": 1, "history": 1, "total": 2, "devices": 1, "traffic": 2000, "matched": 2})
+            self.assertEqual({row["id"] for row in global_viewer["sessions"]}, {"active", "recent", "other"})
+            self.assertEqual(next(row["node"] for row in global_viewer["sessions"] if row["id"] == "other"), "DIRECT")
+            self.assertEqual(global_viewer["summary"]["devices"], 2)
             with connect(database) as connection:
                 remaining = {row[0] for row in connection.execute("SELECT id FROM connection_sessions")}
             self.assertNotIn("expired", remaining)
@@ -188,8 +261,10 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(proxy["events"][0]["host"], "huggingface.co")
             self.assertEqual(proxy["events"][0]["device"], "192.168.31.42")
             self.assertEqual(proxy["events"][0]["rule"], "AI 模型")
-            self.assertEqual(proxy["events"][0]["policy"], "美国最佳")
-            self.assertEqual(proxy["events"][0]["node"], "us-lax-03")
+            self.assertEqual(proxy["events"][0]["policyId"], "美国最佳")
+            self.assertEqual(proxy["events"][0]["policy"], "🇺🇸 美国最佳")
+            self.assertEqual(proxy["events"][0]["nodeId"], "us-lax-03")
+            self.assertEqual(proxy["events"][0]["node"], "🇺🇸 us-lax-03")
             self.assertEqual(proxy["events"][0]["traffic"], 10 * 1024**3 + 3072)
             self.assertEqual(proxy["events"][0]["connectionCount"], 2)
             self.assertEqual(proxy["events"][0]["ruleVariants"], 2)
@@ -199,6 +274,41 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(len(details["events"]), 2)
             self.assertTrue(all(not row["grouped"] for row in details["events"]))
             self.assertEqual(direct["events"][0]["route"], "direct")
+
+    def test_traffic_ledger_detail_target_is_exact_and_matches_group_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(settings, data_dir=data_dir, device_aliases_path=data_dir / "devices.json")
+            now = 1_786_400_000
+            with connect(database) as connection:
+                migrate(connection)
+                connection.executemany(
+                    """
+                    INSERT INTO connection_sessions(
+                        id,device,host,destination_ip,destination_port,network,rule,chain,
+                        started_at,last_seen_at,ended_at,upload_bytes,download_bytes
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        ("github-large", "192.168.31.42", "github.com", "1.1.1.1", "443", "tcp", "美国域名", '["节点选择","美国最佳","us-lax-03"]', now - 300, now - 20, now - 20, 100, 2 * 1024**3),
+                        ("github-dot", "192.168.31.42", "github.com.", "1.1.1.2", "443", "tcp", "美国域名", '["节点选择","美国最佳","us-lax-03"]', now - 200, now - 10, now - 10, 200, 1024**3),
+                        ("api-github", "192.168.31.42", "api.github.com", "1.1.1.3", "443", "tcp", "美国域名", '["节点选择","美国最佳","us-lax-03"]', now - 100, now - 5, now - 5, 300, 4096),
+                    ),
+                )
+            patches = (
+                patch("server.main.settings", test_settings),
+                patch("server.main.time.time", return_value=now),
+                patch.object(rule_workspace, "summary", return_value={"availablePolicies": ["节点选择", "美国最佳"]}),
+                patch.object(rule_workspace, "match_catalog", return_value={"providers": {}, "custom": {}, "fallback": {}}),
+            )
+            with patches[0], patches[1], patches[2], patches[3]:
+                grouped = _traffic_ledger({"role": "admin"}, "24h", "proxy", "traffic", "192.168.31.42", "", 100, 0, "device-target", "all")
+                details = _traffic_ledger({"role": "admin"}, "24h", "proxy", "recent", "192.168.31.42", "", 500, 0, "connection", "all", "github.com")
+            github = next(event for event in grouped["events"] if event["targetKey"] == "github.com")
+            self.assertEqual(len(details["events"]), 2)
+            self.assertEqual({event["host"] for event in details["events"]}, {"github.com", "github.com."})
+            self.assertEqual(sum(event["traffic"] for event in details["events"]), github["traffic"])
 
     def test_monthly_analysis_keeps_proxy_direct_and_unknown_mutually_exclusive(self):
         with tempfile.TemporaryDirectory() as directory:

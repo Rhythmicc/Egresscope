@@ -1,6 +1,6 @@
 {
   "name": "egresscope",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A multi-user mihomo gateway console with durable traffic attribution.",
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -22,8 +22,10 @@
     "vite": "6.4.3"
   },
   "overrides": {
-    "nanoid": "3.3.17",
+    "nanoid": "3.3.18",
     "postcss": "8.5.23"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  }
 }
