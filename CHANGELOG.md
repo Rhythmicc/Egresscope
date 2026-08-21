@@ -2,6 +2,12 @@
 
 All notable changes to Egresscope are documented in this file.
 
+## [0.4.1] - 2026-08-21
+
+### Fixed
+
+- Keep merged Surge and Clash/Mihomo delivery URLs available when automatic combo exit rotation is paused. Delivery URLs are revoked only by rotating their token or deleting the combo.
+
 ## [0.4.0] - 2026-08-21
 
 ### Added
