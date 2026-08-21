@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 15
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -375,7 +375,79 @@ def _migration_9(connection: sqlite3.Connection) -> None:
     )
 
 
-MIGRATIONS = (_migration_1, _migration_2, _migration_3, _migration_4, _migration_5, _migration_6, _migration_7, _migration_8, _migration_9)
+def _migration_10(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS rotation_combos (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            subscription_ids TEXT NOT NULL DEFAULT '[]',
+            strategy TEXT NOT NULL DEFAULT 'region_sticky',
+            rotate_interval_seconds INTEGER NOT NULL DEFAULT 1800,
+            cross_region_interval_seconds INTEGER NOT NULL DEFAULT 259200,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            gateway_enabled INTEGER NOT NULL DEFAULT 0,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rotation_combos_enabled ON rotation_combos(enabled, gateway_enabled);
+        """
+    )
+
+
+def _migration_11(connection: sqlite3.Connection) -> None:
+    combo_columns = _columns(connection, "rotation_combos")
+    if "owner_id" not in combo_columns:
+        connection.execute("ALTER TABLE rotation_combos ADD COLUMN owner_id INTEGER NOT NULL DEFAULT 0")
+    if "delivery_token" not in combo_columns:
+        connection.execute("ALTER TABLE rotation_combos ADD COLUMN delivery_token TEXT NOT NULL DEFAULT ''")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_rotation_combos_owner ON rotation_combos(owner_id)")
+
+
+def _migration_12(connection: sqlite3.Connection) -> None:
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS node_regions (
+            node_key TEXT PRIMARY KEY,
+            subscription_id TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            country TEXT NOT NULL DEFAULT '',
+            region TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'name' CHECK(source IN ('name','geoip','manual')),
+            probed_ip TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_node_regions_subscription ON node_regions(subscription_id);
+        """
+    )
+
+
+def _migration_13(connection: sqlite3.Connection) -> None:
+    combo_columns = _columns(connection, "rotation_combos")
+    if "ai_assist" not in combo_columns:
+        connection.execute("ALTER TABLE rotation_combos ADD COLUMN ai_assist INTEGER NOT NULL DEFAULT 0")
+
+
+def _migration_14(connection: sqlite3.Connection) -> None:
+    combo_columns = _columns(connection, "rotation_combos")
+    if "rotation_prefs" not in combo_columns:
+        # 轮换偏好：启用因素的有序优先级列表，如 ["usage_balance","region_health","region_latency"]。
+        # 有序逐级生效：先按最高优先级因素排序，平局再看下一级。
+        connection.execute("ALTER TABLE rotation_combos ADD COLUMN rotation_prefs TEXT NOT NULL DEFAULT '[]'")
+
+
+def _migration_15(connection: sqlite3.Connection) -> None:
+    subscription_columns = _columns(connection, "subscriptions")
+    if "url_repeatable" not in subscription_columns:
+        # 0 = 一次性链接（默认，导入后不自动轮询），1 = 可重复访问（允许自动刷新）。
+        connection.execute("ALTER TABLE subscriptions ADD COLUMN url_repeatable INTEGER NOT NULL DEFAULT 0")
+    if "consumed_at" not in subscription_columns:
+        connection.execute("ALTER TABLE subscriptions ADD COLUMN consumed_at INTEGER")
+
+
+MIGRATIONS = (_migration_1, _migration_2, _migration_3, _migration_4, _migration_5, _migration_6, _migration_7, _migration_8, _migration_9, _migration_10, _migration_11, _migration_12, _migration_13, _migration_14, _migration_15)
 
 
 def migrate(connection: sqlite3.Connection) -> None:

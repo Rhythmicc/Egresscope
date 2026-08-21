@@ -99,11 +99,18 @@ function StrategiesPage({ strategies, onChanged, canManage }) {
   };
   const delayChip = (item) => <span className={`latency-chip ${item.delayLevel || "unavailable"}`}><i />{item.delay || "待测速"}</span>;
   const regionNodes = (group) => {
+    // 只有父组当前出口对应的子组（如 美国 → 美国智能）里选中的节点才是真正的当前出口；
+    // 其余子组（最佳/均衡）各自的 now 只是组内状态，不代表流量实际走的节点，不标 selected。
+    const activeChildId = group.now;
     const unique = new Map();
-    group.children?.forEach(child => child.members?.forEach(member => {
-      const existing = unique.get(member.id);
-      unique.set(member.id, existing ? { ...existing, ...member, selected: existing.selected || member.selected } : member);
-    }));
+    group.children?.forEach(child => {
+      const isActive = child.id === activeChildId;
+      child.members?.forEach(member => {
+        const existing = unique.get(member.id);
+        const selected = isActive && member.selected;
+        unique.set(member.id, existing ? { ...existing, ...member, selected: existing.selected || selected } : { ...member, selected });
+      });
+    });
     return [...unique.values()];
   };
   const toggle = (id) => setExpanded(current => {
@@ -153,7 +160,6 @@ function StrategiesPage({ strategies, onChanged, canManage }) {
   return (
     <div className="page-content strategies-page">
       <div className="proxy-workbench-head"><h2>分流策略</h2><div className="proxy-workbench-actions"><label className="proxy-search"><MagnifyingGlass /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索策略或节点" /></label>{canManage && <button type="button" className="retest-button" disabled={testing} onClick={runTestDelay}><ArrowClockwise className={testing ? "spinning" : ""} />{testing ? "测速中…" : "重新测速"}</button>}{canManage && <label className="reconnect-toggle"><input type="checkbox" checked={reconnect} onChange={event => setReconnect(event.target.checked)} /><span><strong>切换后重连</strong></span></label>}</div></div>
-      <div className="proxy-summary-strip"><span><ArrowsDownUp />{strategies.primary.length} 个常用策略</span></div>
       {message && <div className="inline-message strategy-message">{message}</div>}
       <div className="proxy-groups">{strategies.primary.map(strategySection)}
       <button className="collapsed-groups proxy-secondary-toggle" onClick={() => setSecondaryExpanded(!secondaryExpanded)}><span><Stack />其他规则策略</span><small>{strategies.secondaryCount} 个</small><CaretDown className={secondaryExpanded ? "rotated" : ""}/></button>
@@ -249,9 +255,9 @@ function RulesPage({ canManage }) {
     <div className="rule-stat-grid"><div><span>规则集</span><strong>{workspace?.counts?.ruleSets ?? "—"}</strong></div><div><span>自定义规则</span><strong>{workspace?.counts?.customRules ?? "—"}</strong></div><div><span>工作区版本</span><strong>r{workspace?.revision ?? "—"}</strong></div><div><span>安全兜底</span><strong>{workspace?.fallbackRules?.at(-1)?.policy || "—"}</strong></div></div>
     <section className="panel rule-set-panel"><div className="rule-toolbar"><h3>有序规则集</h3><label className="search-box"><MagnifyingGlass /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、来源或目标策略" />{query && <button onClick={() => setQuery("")}><X /></button>}</label></div><div className="rule-set-head"><span>顺序 / 状态</span><span>规则集</span><span>目标策略</span><span>更新周期</span><span>操作</span></div><div className="rule-set-list">{sets.map((item, visibleIndex) => { const index = workspace.ruleSets.findIndex(row => row.id === item.id); return <div className={`rule-set-row ${!item.enabled ? "disabled" : ""}`} key={item.id}><span className="rule-order"><b>{String(index + 1).padStart(2,"0")}</b><label className="rule-switch"><input type="checkbox" disabled={!canManage || busy} checked={item.enabled} onChange={event => run(() => api.updateRuleSet(item.id, { enabled: event.target.checked }), event.target.checked ? "规则集已启用，应用后生效。" : "规则集已停用，应用后生效。")} /><i /></label></span><span className="rule-set-name"><strong>{item.name}</strong><small>{sourceHost(item.url)} · {item.behavior}/{item.format}</small></span><span><b className="policy-chip">{item.policy}</b></span><span className="rule-interval">{Math.round(item.interval / 3600)} 小时</span><span className="rule-row-actions">{canManage && <><button disabled={busy || index === 0 || query} title="上移" onClick={() => run(() => api.moveRuleSet(item.id,"up"), "顺序已调整，应用后生效。")}>↑</button><button disabled={busy || index === workspace.ruleSets.length - 1 || query} title="下移" onClick={() => run(() => api.moveRuleSet(item.id,"down"), "顺序已调整，应用后生效。")}>↓</button><button onClick={() => setSetEditor({ ...item })}>编辑</button><button className="danger-link" onClick={() => confirm(`删除规则集「${item.name}」？`) && run(() => api.deleteRuleSet(item.id), "规则集已删除，应用后生效。")}>删除</button></>}</span></div>; })}</div></section>
     <section className="panel custom-rules-panel"><div className="panel-heading"><h2>自定义覆盖规则</h2></div>{workspace?.customRules?.length ? <div className="custom-rule-list">{workspace.customRules.map(rule => <div className={!rule.enabled ? "disabled" : ""} key={rule.id}><label className="rule-switch"><input type="checkbox" disabled={!canManage} checked={rule.enabled} onChange={event => run(() => api.updateCustomRule(rule.id,{ enabled:event.target.checked }), "规则状态已更新。")}/><i /></label><span className="rule-placement">{rule.placement === "after" ? "后置" : "前置"}</span><code>{rule.content}</code><span className="policy-chip">{rule.policy}</span>{canManage && <span className="rule-row-actions"><button onClick={() => setCustomEditor({ ...rule })}>编辑</button><button className="danger-link" onClick={() => confirm("删除这条自定义规则？") && run(() => api.deleteCustomRule(rule.id), "自定义规则已删除。")}>删除</button></span>}</div>)}</div> : <div className="empty-rules">还没有自定义规则</div>}</section>
-    {setEditor && <div className="modal-backdrop" onMouseDown={() => setSetEditor(null)}><form className="user-modal rule-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveSet}><div className="modal-heading"><div><span className="eyebrow">规则集</span><h3>{setEditor.id ? "编辑规则集" : "添加规则集"}</h3></div><button type="button" onClick={() => setSetEditor(null)}><X /></button></div><label>名称<input required value={setEditor.name} onChange={event => setSetEditor({...setEditor,name:event.target.value})}/></label><label>远程地址<input required type="url" value={setEditor.url} onChange={event => setSetEditor({...setEditor,url:event.target.value})}/></label><label>目标策略<select value={setEditor.policy} onChange={event => setSetEditor({...setEditor,policy:event.target.value})}>{workspace.availablePolicies.map(policy => <option key={policy} value={policy}>{policy}</option>)}</select></label><div className="modal-fields"><label>更新周期（秒）<input type="number" min="300" value={setEditor.interval} onChange={event => setSetEditor({...setEditor,interval:Number(event.target.value)})}/></label><label>内容格式<select value={setEditor.format} onChange={event => setSetEditor({...setEditor,format:event.target.value})}><option value="text">text</option><option value="yaml">yaml</option><option value="mrs">mrs</option></select></label></div><button className="primary-button modal-submit" disabled={busy}>保存到工作区</button></form></div>}
-    {customEditor && <div className="modal-backdrop" onMouseDown={() => setCustomEditor(null)}><form className="user-modal rule-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveCustom}><div className="modal-heading"><div><span className="eyebrow">请求匹配</span><h3>{customEditor.id ? "编辑自定义规则" : "添加自定义规则"}</h3></div><button type="button" onClick={() => setCustomEditor(null)}><X /></button></div><label>规则内容<input required value={customEditor.content} onChange={event => setCustomEditor({...customEditor,content:event.target.value})} placeholder="DOMAIN-SUFFIX,example.com,节点选择"/><small>使用 mihomo 规则语法；保存后会解析并在应用时校验策略引用。</small></label><label>位置<select value={customEditor.placement} onChange={event => setCustomEditor({...customEditor,placement:event.target.value})}><option value="before">规则集之前（高优先级）</option><option value="after">规则集之后（低优先级）</option></select></label><label>备注<input value={customEditor.note || ""} onChange={event => setCustomEditor({...customEditor,note:event.target.value})}/></label><button className="primary-button modal-submit" disabled={busy}>保存到工作区</button></form></div>}
-    {githubEditor && <div className="modal-backdrop" onMouseDown={() => setGithubEditor(null)}><form className="user-modal rule-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveGithubConfig}><div className="modal-heading"><div><span className="eyebrow">自定义规则</span><h3>GitHub 同步</h3></div><button type="button" onClick={() => setGithubEditor(null)}><X /></button></div><label>仓库<input value={githubEditor.repo} onChange={event => setGithubEditor({...githubEditor,repo:event.target.value})} placeholder="例如 Rhythmicc/ACL4SSR" required/></label><label>分支<input value={githubEditor.branch} onChange={event => setGithubEditor({...githubEditor,branch:event.target.value})} placeholder="留空使用仓库默认分支"/></label><label>文件路径<input value={githubEditor.path} onChange={event => setGithubEditor({...githubEditor,path:event.target.value})} placeholder="例如 Clash/egresscope-custom-rules.json" required/></label><label>Personal Access Token<input type="password" autoComplete="new-password" value={githubEditor.token || ""} onChange={event => setGithubEditor({...githubEditor,token:event.target.value})} placeholder={githubEditor.tokenConfigured ? "已配置；留空表示保留" : "需要 repo 写权限的 Token"}/></label>{github?.lastError && <div className="subscription-error"><WarningCircle />{github.lastError}</div>}<div className="modal-actions-row"><button type="submit" className="primary-button modal-submit" disabled={syncBusy}>{syncBusy ? "处理中…" : "保存配置"}</button><button type="button" className="filter-button" disabled={syncBusy || !github?.tokenConfigured} onClick={() => runGithubSync("pull", "拉取会用 GitHub 上的规则替换本地自定义规则，继续吗？")}>从 GitHub 拉取</button><button type="button" className="filter-button" disabled={syncBusy || !github?.tokenConfigured} onClick={() => runGithubSync("push")}>推送到 GitHub</button></div>{github?.lastSyncAt ? <div className="github-sync-status">上次同步 {shanghaiTime(github.lastSyncAt)}</div> : <div className="github-sync-status">尚未同步</div>}</form></div>}
+    {setEditor && <div className="modal-backdrop" onMouseDown={() => setSetEditor(null)}><form className="user-modal rule-modal" role="dialog" aria-modal="true" aria-labelledby="rule-set-editor-title" onMouseDown={event => event.stopPropagation()} onSubmit={saveSet}><div className="modal-heading"><div><span className="eyebrow">规则集</span><h3 id="rule-set-editor-title">{setEditor.id ? "编辑规则集" : "添加规则集"}</h3></div><button type="button" aria-label="关闭规则集编辑器" onClick={() => setSetEditor(null)}><X /></button></div><label>名称<input required autoFocus value={setEditor.name} onChange={event => setSetEditor({...setEditor,name:event.target.value})}/></label><label>远程地址<input required type="url" value={setEditor.url} onChange={event => setSetEditor({...setEditor,url:event.target.value})}/></label><label>目标策略<select value={setEditor.policy} onChange={event => setSetEditor({...setEditor,policy:event.target.value})}>{workspace.availablePolicies.map(policy => <option key={policy} value={policy}>{policy}</option>)}</select></label><div className="modal-fields"><label>更新周期（秒）<input type="number" min="300" value={setEditor.interval} onChange={event => setSetEditor({...setEditor,interval:Number(event.target.value)})}/></label><label>内容格式<select value={setEditor.format} onChange={event => setSetEditor({...setEditor,format:event.target.value})}><option value="text">text</option><option value="yaml">yaml</option><option value="mrs">mrs</option></select></label></div><button className="primary-button modal-submit" disabled={busy}>保存到工作区</button></form></div>}
+    {customEditor && <div className="modal-backdrop" onMouseDown={() => setCustomEditor(null)}><form className="user-modal rule-modal" role="dialog" aria-modal="true" aria-labelledby="custom-rule-editor-title" onMouseDown={event => event.stopPropagation()} onSubmit={saveCustom}><div className="modal-heading"><div><span className="eyebrow">请求匹配</span><h3 id="custom-rule-editor-title">{customEditor.id ? "编辑自定义规则" : "添加自定义规则"}</h3></div><button type="button" aria-label="关闭自定义规则编辑器" onClick={() => setCustomEditor(null)}><X /></button></div><label>规则内容<input required autoFocus value={customEditor.content} onChange={event => setCustomEditor({...customEditor,content:event.target.value})} placeholder="DOMAIN-SUFFIX,example.com,节点选择"/><small>使用 mihomo 规则语法；保存后会解析并在应用时校验策略引用。</small></label><label>位置<select value={customEditor.placement} onChange={event => setCustomEditor({...customEditor,placement:event.target.value})}><option value="before">规则集之前（高优先级）</option><option value="after">规则集之后（低优先级）</option></select></label><label>备注<input value={customEditor.note || ""} onChange={event => setCustomEditor({...customEditor,note:event.target.value})}/></label><button className="primary-button modal-submit" disabled={busy}>保存到工作区</button></form></div>}
+    {githubEditor && <div className="modal-backdrop" onMouseDown={() => setGithubEditor(null)}><form className="user-modal rule-modal" role="dialog" aria-modal="true" aria-labelledby="github-editor-title" onMouseDown={event => event.stopPropagation()} onSubmit={saveGithubConfig}><div className="modal-heading"><div><span className="eyebrow">自定义规则</span><h3 id="github-editor-title">GitHub 同步</h3></div><button type="button" aria-label="关闭 GitHub 同步" onClick={() => setGithubEditor(null)}><X /></button></div><label>仓库<input autoFocus value={githubEditor.repo} onChange={event => setGithubEditor({...githubEditor,repo:event.target.value})} placeholder="例如 Rhythmicc/ACL4SSR" required/></label><label>分支<input value={githubEditor.branch} onChange={event => setGithubEditor({...githubEditor,branch:event.target.value})} placeholder="留空使用仓库默认分支"/></label><label>文件路径<input value={githubEditor.path} onChange={event => setGithubEditor({...githubEditor,path:event.target.value})} placeholder="例如 Clash/egresscope-custom-rules.json" required/></label><label>Personal Access Token<input type="password" autoComplete="new-password" value={githubEditor.token || ""} onChange={event => setGithubEditor({...githubEditor,token:event.target.value})} placeholder={githubEditor.tokenConfigured ? "已配置；留空表示保留" : "需要 repo 写权限的 Token"}/></label>{github?.lastError && <div className="subscription-error"><WarningCircle />{github.lastError}</div>}<div className="modal-actions-row"><button type="submit" className="primary-button modal-submit" disabled={syncBusy}>{syncBusy ? "处理中…" : "保存配置"}</button><button type="button" className="filter-button" disabled={syncBusy || !github?.tokenConfigured} onClick={() => runGithubSync("pull", "拉取会用 GitHub 上的规则替换本地自定义规则，继续吗？")}>从 GitHub 拉取</button><button type="button" className="filter-button" disabled={syncBusy || !github?.tokenConfigured} onClick={() => runGithubSync("push")}>推送到 GitHub</button></div>{github?.lastSyncAt ? <div className="github-sync-status">上次同步 {shanghaiTime(github.lastSyncAt)}</div> : <div className="github-sync-status">尚未同步</div>}</form></div>}
   </div>;
 }
 
@@ -299,6 +305,71 @@ function GatewayPage({ canManage }) {
   const [eventLevel, setEventLevel] = useState("all");
   const [eventQuery, setEventQuery] = useState("");
   const [openRows, setOpenRows] = useState(new Set(["access:gateway", "exit:DIRECT"]));
+  const [kernel, setKernel] = useState(null);
+  const [kernelVersion, setKernelVersion] = useState("");
+  const [kernelBusy, setKernelBusy] = useState(false);
+  const [geoip, setGeoip] = useState(null);
+  const [regions, setRegions] = useState([]);
+  const [regionDraft, setRegionDraft] = useState({});
+  const loadKernelTab = async () => {
+    try { const [k, g, r] = await Promise.all([api.kernelStatus(), api.geoipMmdb(), api.nodeRegions()]); setKernel(k); setGeoip(g); setRegions(r.regions || []); }
+    catch (error) { if (!DEMO_MODE) setMessage(error.message); }
+  };
+  useEffect(() => { if (tab === "kernel") loadKernelTab(); }, [tab]);
+  const loadRegions = async () => {
+    try { setRegions((await api.nodeRegions()).regions || []); }
+    catch (error) { if (!DEMO_MODE) setMessage(error.message); }
+  };
+  const saveRegion = async (key) => {
+    const draft = regionDraft[key] || {};
+    if (!draft.region) { setMessage("地区不能为空。"); return; }
+    setKernelBusy(true); setMessage("");
+    try {
+      await api.assignNodeRegion(key, draft.country || "", draft.region);
+      setMessage("节点地区已保存。");
+      await loadRegions();
+    } catch (error) { setMessage(error.message); }
+    finally { setKernelBusy(false); }
+  };
+  const kernelRun = async (fn, success) => {
+    setKernelBusy(true); setMessage("");
+    try {
+      const result = await fn();
+      const status = await api.kernelStatus();
+      setKernel(status);
+      setMessage(success);
+      return result;
+    } catch (error) { setMessage(error.message); }
+    finally { setKernelBusy(false); }
+  };
+  const checkKernel = async () => {
+    setKernelBusy(true); setMessage("");
+    try {
+      const latest = await api.kernelCheck();
+      const status = await api.kernelStatus();
+      setKernel({ ...status, latest });
+      setMessage(latest.version ? `最新版本 ${latest.version}（${latest.publishedAt ? shanghaiTime(new Date(latest.publishedAt).getTime() / 1000) : "未知时间"}）。` : "未找到最新版本。");
+    } catch (error) { setMessage(error.message); }
+    finally { setKernelBusy(false); }
+  };
+  const uploadMmdb = async (file) => {
+    setKernelBusy(true); setMessage("");
+    try { setGeoip(await api.geoipMmdbUpload(file)); setMessage("GeoIP 离线地区库已更新。"); }
+    catch (error) { setMessage(error.message); }
+    finally { setKernelBusy(false); }
+  };
+  const deleteMmdb = async () => {
+    setKernelBusy(true); setMessage("");
+    try { setGeoip(await api.geoipMmdbDelete()); setMessage("已删除离线地区库，回退到在线解析。"); }
+    catch (error) { setMessage(error.message); }
+    finally { setKernelBusy(false); }
+  };
+  const downloadMmdb = async () => {
+    setKernelBusy(true); setMessage("");
+    try { setGeoip(await api.geoipMmdbDownload()); setMessage("已从默认源下载并安装 GeoIP 离线地区库。"); }
+    catch (error) { setMessage(error.message); }
+    finally { setKernelBusy(false); }
+  };
   const loadDevices = () => api.deviceAliases().then(result => { setAliases(result.aliases || {}); setDevices(result.devices || []); }).catch(error => {
     if (DEMO_MODE) {
       const sample = [
@@ -322,7 +393,7 @@ function GatewayPage({ canManage }) {
   const known = [...new Map(devices.map(device => [device.ip, device])).values()];
   const statRow = (item, kind) => { const key = `${kind}:${item.id || item.name}`; const open = openRows.has(key); return <article className={`runtime-row ${open ? "open" : ""}`} key={key}><button className="runtime-row-head" onClick={() => toggleRow(key)}><span className={`runtime-mark ${kind}`}><i /></span><span><strong>{item.name}</strong><small>{kind === "access" ? `${item.devices?.length || 0} 台设备` : `${item.activeConnections || 0} 条活跃连接`}</small></span><b>{bytes(item.total)}</b><CaretDown /></button>{open && <div className="runtime-row-detail"><span><small>上传</small><strong>{bytes(item.up)}</strong></span><span><small>下载</small><strong>{bytes(item.down)}</strong></span><span><small>当前速度</small><strong>↑ {rate(item.currentUpRate)} · ↓ {rate(item.currentDownRate)}</strong></span><span><small>峰值速度</small><strong>↑ {rate(item.peakUpRate)} · ↓ {rate(item.peakDownRate)}</strong></span>{kind === "access" && item.devices?.length > 0 && <p>{item.devices.join(" · ")}</p>}</div>}</article>; };
   return <div className="page-content gateway-page">
-    <div className="gateway-workspace-head"><h2>网关设置</h2><div className="gateway-tabs"><button className={tab === "runtime" ? "active" : ""} onClick={() => setTab("runtime")}>运行统计</button><button className={tab === "events" ? "active" : ""} onClick={() => setTab("events")}>事件记录</button><button className={tab === "devices" ? "active" : ""} onClick={() => setTab("devices")}>设备管理</button></div>{tab === "devices" && canManage && <button className="primary-button" onClick={save}><CheckCircle /> 保存名称</button>}{tab === "runtime" && <button className="icon-action" aria-label="刷新运行统计" onClick={loadRuntime}><ArrowClockwise /></button>}{tab === "events" && <button className="icon-action" aria-label="刷新事件" onClick={loadEvents}><ArrowClockwise /></button>}</div>
+    <div className="gateway-workspace-head"><h2>网关设置</h2><div className="gateway-tabs"><button className={tab === "runtime" ? "active" : ""} onClick={() => setTab("runtime")}>运行统计</button><button className={tab === "events" ? "active" : ""} onClick={() => setTab("events")}>事件记录</button><button className={tab === "devices" ? "active" : ""} onClick={() => setTab("devices")}>设备管理</button><button className={tab === "kernel" ? "active" : ""} onClick={() => setTab("kernel")}>内核与地区库</button></div>{tab === "devices" && canManage && <button className="primary-button" onClick={save}><CheckCircle /> 保存名称</button>}{tab === "runtime" && <button className="icon-action" aria-label="刷新运行统计" onClick={loadRuntime}><ArrowClockwise /></button>}{tab === "events" && <button className="icon-action" aria-label="刷新事件" onClick={loadEvents}><ArrowClockwise /></button>}</div>
     {message && <div className="inline-message">{message}</div>}
     {tab === "runtime" && <div className="gateway-runtime">
       <section className="panel runtime-summary"><div><span>启动时间</span><strong>{shanghaiDateTime(runtime?.startedAt)}</strong></div><div><span>运行时长</span><strong>{runtimeDuration(runtime?.uptimeSeconds)}</strong></div><div><span>累计流量</span><strong>{bytes(runtime?.total)}</strong></div><div><span>活跃出口</span><strong>{runtime?.activeExits ?? "—"}</strong></div></section>
@@ -331,6 +402,39 @@ function GatewayPage({ canManage }) {
     </div>}
     {tab === "events" && <div className="gateway-events"><div className="event-toolbar"><div className="range-tabs">{[["all","全部"],["info","信息"],["warning","警告"],["error","错误"]].map(([value,label]) => <button key={value} className={eventLevel === value ? "active" : ""} onClick={() => setEventLevel(value)}>{label}</button>)}</div><form className="event-search" onSubmit={event => { event.preventDefault(); loadEvents(); }}><MagnifyingGlass /><input value={eventQuery} onChange={event => setEventQuery(event.target.value)} placeholder="搜索事件" /></form></div><section className="panel event-list">{events.events.length ? events.events.map(item => <article className={`event-row ${item.level}`} key={item.id}><span className="event-level">{item.level === "error" ? "错误" : item.level === "warning" ? "警告" : "信息"}</span><div><strong>{item.title}</strong>{item.message && <p>{item.message}</p>}<time>{shanghaiDateTime(item.createdAt)}</time></div></article>) : <div className="event-empty">没有符合条件的事件</div>}</section></div>}
     {tab === "devices" && <><section className="panel gateway-summary"><div><span>默认网关</span><strong>192.168.31.190</strong></div><div><span>透明 DNS</span><strong>198.18.0.2</strong></div><div><span>运行模式</span><strong>TUN + 显式代理</strong></div></section><section className="panel managed-devices"><div className="panel-heading"><h2>已识别设备</h2></div><div className="device-editor-head"><span>来源 IP</span><span>设备名称</span><span>接入方式</span><span>活跃连接</span><span>最后活动</span></div>{known.map(device => <div className="device-editor-row" key={device.ip}><code>{device.ip}</code><input disabled={!canManage} value={aliases[device.ip] ?? device.name ?? ""} onChange={event => setAliases(current => ({ ...current, [device.ip]: event.target.value }))} /><span className={`device-source ${device.sourceType || "unknown"}`}><i />{device.sourceType === "proxy" ? "显式代理" : device.sourceType === "gateway" ? "局域网网关" : "未知"}</span><span className={device.active ? "device-active" : "device-idle"}>{device.active || 0}</span><time>{device.active ? "正在活动" : shanghaiTime(device.lastSeen)}</time></div>)}</section></>}
+    {tab === "kernel" && <div className="gateway-kernel">
+      <section className="panel kernel-panel">
+        <div className="kernel-panel-head"><h2>mihomo 内核</h2>{kernel?.pendingRestart && <b className="kernel-restart-badge">重启容器后生效</b>}<button className="filter-button" disabled={kernelBusy} onClick={checkKernel}>检查更新</button></div>
+        <div className="kernel-grid">
+          <span><small>运行版本</small><strong>{kernel?.runningVersion || "—"}</strong></span>
+          <span><small>最新版本</small><strong>{kernel?.latest?.version || "—"}</strong></span>
+          <span><small>架构</small><strong>{kernel?.arch || "—"}</strong></span>
+          <span><small>当前暂存</small><strong>{kernel?.current || "镜像内置"}</strong></span>
+        </div>
+        <div className="kernel-actions">
+          <input value={kernelVersion} onChange={event => setKernelVersion(event.target.value)} placeholder="下载指定版本，如 1.20.0" />
+          <button className="filter-button" disabled={kernelBusy || !kernelVersion.trim()} onClick={() => kernelRun(() => api.kernelDownload(kernelVersion.trim()), "内核已下载并校验。")}>下载</button>
+          <button className="filter-button" disabled={kernelBusy || !kernel?.latest?.version} onClick={() => kernelRun(() => api.kernelDownload(kernel.latest.version), "最新内核已下载并校验。")}>下载最新</button>
+          <button className="primary-button" disabled={kernelBusy || !kernel?.current} onClick={() => kernelRun(() => api.kernelApply(kernel.current), "已切换当前版本，重启 mihomo 容器后生效。")}>应用</button>
+          <button className="filter-button" disabled={kernelBusy} onClick={() => kernelRun(api.kernelRollback, "已回滚，重启 mihomo 容器后生效。")}>回滚</button>
+        </div>
+        <div className="kernel-staged">{kernel?.staged?.length ? kernel.staged.map(item => <div className="kernel-staged-row" key={item.version}><span>{item.version}</span><small>{(item.size / 1024 / 1024).toFixed(1)} MiB</small>{kernel.current === item.version && <b>当前</b>}<button className="filter-button" disabled={kernelBusy} onClick={() => kernelRun(() => api.kernelDelete(item.version), "暂存已删除。")}>删除</button></div>) : <div className="empty-rules">还没有暂存的内核版本</div>}</div>
+      </section>
+      <section className="panel kernel-panel">
+        <div className="kernel-panel-head"><h2>GeoIP 离线地区库</h2><div className="kernel-panel-actions"><button className="primary-button" disabled={kernelBusy} onClick={downloadMmdb}>下载默认库</button><label className="filter-button"><input type="file" accept=".mmdb" hidden onChange={event => event.target.files?.[0] && uploadMmdb(event.target.files[0])} />上传 .mmdb</label>{geoip?.enabled && <button className="filter-button danger-link" onClick={() => confirm("删除离线地区库？将回退到在线解析。") && deleteMmdb()}>删除</button>}</div></div>
+        {geoip?.downloadUrl && <div className="kernel-hint">默认库来源：<code>{geoip.downloadUrl}</code>（wp-statistics/GeoLite2-City，定时更新）</div>}
+        <div className="kernel-grid">
+          <span><small>状态</small><strong>{geoip?.enabled ? "离线库可用" : "未启用（在线兜底）"}</strong></span>
+          <span><small>文件</small><strong>{geoip?.path ? geoip.path.split("/").pop() : "—"}</strong></span>
+          <span><small>大小</small><strong>{geoip?.size ? `${(geoip.size / 1024 / 1024).toFixed(1)} MiB` : "—"}</strong></span>
+          <span><small>更新时间</small><strong>{geoip?.modifiedAt ? shanghaiTime(geoip.modifiedAt) : "—"}</strong></span>
+        </div>
+      </section>
+      <section className="panel kernel-panel">
+        <div className="kernel-panel-head"><h2>节点地区库</h2><button className="filter-button" disabled={kernelBusy} onClick={loadRegions}>刷新</button></div>
+        <div className="region-list">{regions.length ? regions.map(row => <div className="region-row" key={row.node_key}><span className="region-node" title={row.node_key}>{row.node_name}</span><em>{row.country || "—"}</em><input value={regionDraft[row.node_key]?.region ?? row.region ?? ""} onChange={event => setRegionDraft(current => ({ ...current, [row.node_key]: { country: row.country, region: event.target.value } }))} placeholder="地区，如 洛杉矶" /><small>{row.source === "geoip" ? "出口探测" : row.source === "manual" ? "手动" : "名称启发式"}{row.probed_ip ? ` · ${row.probed_ip}` : ""}</small><button className="filter-button" disabled={kernelBusy} onClick={() => saveRegion(row.node_key)}>保存</button></div>) : <div className="empty-rules">还没有地区记录；激活网关组合后会自动预填并出口探测。</div>}</div>
+      </section>
+    </div>}
   </div>;
 }
 
@@ -450,7 +554,15 @@ function SubscriptionMenuPopover({ anchor, children }) {
   );
 }
 
-function SubscriptionsPage({ user }) {
+const ROTATION_FACTORS = [
+  { key: "usage_balance", label: "用量均衡" },
+  { key: "region_health", label: "地区健康" },
+  { key: "region_latency", label: "地区延迟" },
+  { key: "node_delay", label: "节点延迟" },
+  { key: "diversity", label: "多样性" },
+];
+
+function SubscriptionsPage({ user, onStrategiesChanged }) {
   const [data, setData] = useState({ subscriptions: [], summary: { count: 0, nodes: 0, healthy: 0, gateway: null } });
   const [editor, setEditor] = useState(null);
   const [busy, setBusy] = useState("");
@@ -459,6 +571,26 @@ function SubscriptionsPage({ user }) {
   const [openMenu, setOpenMenu] = useState(null);
   const [filterEditor, setFilterEditor] = useState(null);
   const [aiEditor, setAiEditor] = useState(null);
+  const [combos, setCombos] = useState([]);
+  const [comboEditor, setComboEditor] = useState(null);
+  const [comboBusy, setComboBusy] = useState(false);
+  const [nodesOpen, setNodesOpen] = useState(null);
+  const [nodesData, setNodesData] = useState({});
+  const toggleComboNodes = async (combo) => {
+    if (nodesOpen === combo.id) { setNodesOpen(null); return; }
+    setNodesOpen(combo.id);
+    setComboBusy(true);
+    try {
+      const nodes = (await api.comboNodes(combo.id)).nodes || [];
+      setNodesData(current => ({ ...current, [combo.id]: nodes }));
+    }
+    catch (error) { setMessage(error.message); setNodesOpen(null); }
+    finally { setComboBusy(false); }
+  };
+  const loadCombos = async () => {
+    try { setCombos((await api.combos()).combos || []); }
+    catch { /* 组合列表不可用时保持现状 */ }
+  };
   const load = async () => {
     try { setData(await api.subscriptions()); setError(false); }
     catch (caught) {
@@ -466,7 +598,7 @@ function SubscriptionsPage({ user }) {
       else { setMessage(caught.message); setError(true); }
     }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); loadCombos(); }, []);
   useEffect(() => {
     const closeMenu = event => {
       if (!event.target.closest(".subscription-menu, .subscription-menu-popover")) setOpenMenu(null);
@@ -503,7 +635,7 @@ function SubscriptionsPage({ user }) {
   };
   const save = async (event) => {
     event.preventDefault();
-    const payload = { name: editor.name, interval: Number(editor.interval), enabled: editor.enabled };
+    const payload = { name: editor.name, interval: Number(editor.interval), enabled: editor.enabled, urlRepeatable: Boolean(editor.urlRepeatable) };
     if (!editor.id || editor.url) payload.url = editor.url;
     const ok = await run(editor.id || "create", () => editor.id ? api.updateSubscription(editor.id, payload) : api.createSubscription(payload), result => result.subscription?.lastError ? `订阅已保存，但首次拉取失败：${result.subscription.lastError}` : editor.id ? "订阅设置已更新。" : "订阅已添加并完成首次解析。");
     if (ok) setEditor(null);
@@ -517,6 +649,36 @@ function SubscriptionsPage({ user }) {
       if (DEMO_MODE) setFilterEditor(filterEditorFrom(item));
       else { setMessage(caught.message); setError(true); }
     } finally { setBusy(""); }
+  };
+  const saveCombo = async (event) => {
+    event.preventDefault();
+    setComboBusy(true); setMessage(""); setError(false);
+    try {
+      const { id, pool, strategyLabel, state, lastError, createdAt, updatedAt, gatewayEnabled, ...payload } = comboEditor;
+      if (!payload.subscriptionIds?.length) throw new Error("组合至少需要一个订阅");
+      const result = id ? await api.updateCombo(id, payload) : await api.createCombo(payload);
+      await loadCombos(); await load();
+      setComboEditor(null);
+      setMessage(id ? "组合已更新。" : "组合已创建，可在卡片上设为网关节点源。");
+    } catch (caught) { setMessage(caught.message); setError(true); }
+    finally { setComboBusy(false); }
+  };
+  const comboAction = async (combo, action, success) => {
+    setComboBusy(true); setMessage(""); setError(false);
+    try {
+      if (action === "activate") await api.activateCombo(combo.id);
+      else if (action === "deactivate") await api.deactivateCombo(combo.id);
+      else if (action === "rotate") await api.rotateCombo(combo.id);
+      else if (action === "cross") await api.crossRegionCombo(combo.id);
+      else if (action === "probe") await api.probeComboRegions(combo.id);
+      else if (action === "rotate-token") await api.rotateComboToken(combo.id);
+      else if (action === "delete") await api.deleteCombo(combo.id);
+      await loadCombos(); await load();
+      // 轮换/跨区/激活等会改动 mihomo 选择器，同步刷新分流策略页，避免策略页停留在旧快照。
+      if (onStrategiesChanged && ["rotate", "cross", "activate", "deactivate"].includes(action)) await onStrategiesChanged();
+      setMessage(success);
+    } catch (caught) { setMessage(caught.message); setError(true); }
+    finally { setComboBusy(false); }
   };
   const analyzeFilter = async () => {
     const current = filterEditor;
@@ -592,10 +754,10 @@ function SubscriptionsPage({ user }) {
   };
   const items = data.subscriptions || [];
   return <div className="page-content subscriptions-page">
-    <div className="subscriptions-hero"><h2>订阅与节点来源</h2><div className="subscription-hero-actions">{user?.role === "admin" && <button className="filter-button" disabled={Boolean(busy)} onClick={openAISettings}><Lightning weight="fill" /> AI 模型</button>}<button className="primary-button" onClick={() => setEditor({ name: "", url: "", interval: 21600, enabled: true })}><Plus weight="bold" /> 添加订阅</button></div></div>
+    <div className="subscriptions-hero"><h2>订阅与节点来源</h2><div className="subscription-hero-actions">{user?.role === "admin" && <button className="filter-button" disabled={Boolean(busy)} onClick={openAISettings}><Lightning weight="fill" /> AI 模型</button>}<button className="primary-button" onClick={() => setEditor({ name: "", url: "", interval: 21600, enabled: true, urlRepeatable: false })}><Plus weight="bold" /> 添加订阅</button></div></div>
     {message && <div className={`inline-message ${error ? "is-error" : ""}`}>{error ? <WarningCircle /> : <CheckCircle />}{message}</div>}
     <section className={`subscription-ai-strip ${data.ai?.configured ? "configured" : ""}`}><span className="subscription-ai-icon"><Lightning weight="fill" /></span><div><strong>节点过滤助手</strong><b>{data.ai?.configured ? `${data.ai.providerLabel} · ${data.ai.model}` : "等待管理员配置模型"}</b></div><p>AI 只接收节点名称与协议，不会收到服务器、密码或订阅地址。</p></section>
-    <div className="subscription-stats"><div><span>订阅来源</span><strong>{data.summary?.count ?? 0}</strong></div><div><span>可用节点库存</span><strong>{data.summary?.nodes ?? 0}</strong></div><div><span>网关活动源</span><strong>{data.summary?.gateway || "未设置"}</strong></div><div><span>自动刷新</span><strong>{items.filter(item => item.enabled).length}</strong></div></div>
+    <div className="subscription-stats"><div><span>订阅来源</span><strong>{data.summary?.count ?? 0}</strong></div><div><span>可用节点库存</span><strong>{data.summary?.nodes ?? 0}</strong></div><div><span>网关活动源</span><strong>{data.summary?.gateway || "未设置"}</strong></div><div><span>自动刷新</span><strong>{items.filter(item => item.enabled && item.urlRepeatable).length}</strong></div></div>
     <section className="panel subscription-panel">
       <div className="subscription-panel-head"><h3>订阅列表</h3><button className="filter-button" disabled={Boolean(busy)} onClick={() => run("all", async () => { for (const item of items.filter(row => row.enabled)) await api.refreshSubscription(item.id); }, "所有已启用订阅均已刷新。") }><ArrowClockwise /> 刷新全部</button></div>
       {items.length ? <div className="subscription-list">{items.map(item => {
@@ -603,7 +765,7 @@ function SubscriptionsPage({ user }) {
         const total = Number(item.usage?.total || 0);
         const percent = total ? Math.min(100, used / total * 100) : 0;
         return <article className={`subscription-card ${item.gatewayEnabled ? "is-gateway" : ""} ${openMenu?.id === item.id ? "menu-open" : ""}`} key={item.id}>
-          <div className="subscription-source"><span className={`subscription-health ${item.lastError ? "failed" : item.fetchedAt ? "healthy" : "pending"}`}><CloudArrowDown weight="fill" /></span><div><div className="subscription-title"><h3>{item.name}</h3>{item.gatewayEnabled && <b>网关节点源</b>}{item.filterPreview?.excluded > 0 && <em className="subscription-filter-badge">{item.filterSource === "ai" ? "AI 过滤" : "已过滤"} {item.filterPreview.excluded}</em>}{user?.role === "admin" && item.owner !== user.username && <em>{item.owner}</em>}</div><p>{item.maskedUrl}</p><div className="subscription-node-count"><HardDrives /><strong>{item.nodeCount || 0}</strong><span>{item.rawNodeCount > item.nodeCount ? `/ ${item.rawNodeCount} 个节点` : "个节点"}</span>{item.lastError && <b>刷新失败</b>}</div></div></div>
+          <div className="subscription-source"><span className={`subscription-health ${item.lastError ? "failed" : item.fetchedAt ? "healthy" : "pending"}`}><CloudArrowDown weight="fill" /></span><div><div className="subscription-title"><h3>{item.name}</h3>{item.gatewayEnabled && <b>网关节点源</b>}{!item.urlRepeatable && item.fetchedAt && <em className="subscription-onetime-badge">一次性</em>}{item.filterPreview?.excluded > 0 && <em className="subscription-filter-badge">{item.filterSource === "ai" ? "AI 过滤" : "已过滤"} {item.filterPreview.excluded}</em>}{user?.role === "admin" && item.owner !== user.username && <em>{item.owner}</em>}</div><p>{item.maskedUrl}</p><div className="subscription-node-count"><HardDrives /><strong>{item.nodeCount || 0}</strong><span>{item.rawNodeCount > item.nodeCount ? `/ ${item.rawNodeCount} 个节点` : "个节点"}</span>{item.lastError && <b>刷新失败</b>}</div></div></div>
           <div className="subscription-quota"><div className="subscription-quota-value"><strong>{total ? bytes(used) : "—"}</strong><span>{total ? `已用 / ${bytes(total)}` : "来源未提供配额"}</span></div><i><u style={{ width: `${percent}%` }} /></i>{total > 0 && <b>{percent.toFixed(1)}%</b>}<div className="subscription-lifecycle"><span><b>到期时间</b><time>{item.usage?.expire ? shanghaiTime(item.usage.expire) : "未提供"}</time></span><span><b>更新时间</b><time>{item.lastError ? "刷新失败" : shanghaiTime(item.fetchedAt)}</time></span></div></div>
           <div className="subscription-card-actions">
             <div className="subscription-card-toolbar">
@@ -613,7 +775,7 @@ function SubscriptionsPage({ user }) {
                 {openMenu?.id === item.id && <SubscriptionMenuPopover anchor={openMenu.anchor}>
                   <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); run(item.id, () => api.refreshSubscription(item.id), "订阅已刷新；节点库存与状态已更新。"); }}><ArrowClockwise className={busy === item.id ? "spinning" : ""} />立即刷新</button>
                   <button role="menuitem" disabled={Boolean(busy)} onClick={() => openFilter(item)}><Funnel />节点过滤</button>
-                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); setEditor({ id: item.id, name: item.name, url: "", interval: item.interval, enabled: item.enabled }); }}><PencilSimple />编辑订阅</button>
+                  <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); setEditor({ id: item.id, name: item.name, url: "", interval: item.interval, enabled: item.enabled, urlRepeatable: item.urlRepeatable }); }}><PencilSimple />编辑订阅</button>
                   <button role="menuitem" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); if (confirm(`轮换「${item.name}」的交付链接？旧链接会立即失效。`)) run(`rotate-${item.id}`, () => api.rotateSubscriptionToken(item.id), "交付链接已轮换，旧链接已失效。"); }}><LinkSimple />轮换交付链接</button>
                   <button role="menuitem" className="danger" disabled={Boolean(busy)} onClick={() => { setOpenMenu(null); if (confirm(`删除订阅「${item.name}」？交付地址将立即失效。`)) run(`delete-${item.id}`, () => api.deleteSubscription(item.id), "订阅已删除。"); }}><Trash />删除订阅</button>
                 </SubscriptionMenuPopover>}
@@ -628,13 +790,74 @@ function SubscriptionsPage({ user }) {
         </article>;
       })}</div> : <div className="subscription-empty"><CloudArrowDown /><h3>还没有订阅</h3><p>添加节点来源后，可定时刷新、生成隔离交付地址；管理员还可以把它设为网关节点源。</p><button className="primary-button" onClick={() => setEditor({ name: "", url: "", interval: 21600, enabled: true })}>添加第一个订阅</button></div>}
     </section>
-    {editor && <div className="modal-backdrop" onMouseDown={() => setEditor(null)}><form className="user-modal subscription-modal" onMouseDown={event => event.stopPropagation()} onSubmit={save}><div className="modal-heading"><div><span className="eyebrow">节点来源</span><h3>{editor.id ? "编辑订阅" : "添加订阅"}</h3></div><button type="button" onClick={() => setEditor(null)}><X /></button></div><label>名称<input required value={editor.name} onChange={event => setEditor({ ...editor, name: event.target.value })} placeholder="例如 Example Provider" /></label><label>订阅地址<input required={!editor.id} type="url" value={editor.url} onChange={event => setEditor({ ...editor, url: event.target.value })} placeholder={editor.id ? "留空表示保留当前地址" : "https://example.com/subscribe"} /><small>地址视为凭据保存，不会在列表或 API 响应中明文返回。</small></label><div className="modal-fields"><label>刷新周期<select value={editor.interval} onChange={event => setEditor({ ...editor, interval: Number(event.target.value) })}><option value={3600}>1 小时</option><option value={21600}>6 小时</option><option value={43200}>12 小时</option><option value={86400}>24 小时</option><option value={604800}>7 天</option></select></label><label className="subscription-enabled">自动刷新<span><input type="checkbox" checked={editor.enabled} onChange={event => setEditor({ ...editor, enabled: event.target.checked })} />启用</span></label></div><button className="primary-button modal-submit" disabled={Boolean(busy)}>{busy ? "正在保存与解析…" : "保存订阅"}</button></form></div>}
-    {filterEditor && <div className="modal-backdrop" onMouseDown={() => !filterEditor.aiBusy && setFilterEditor(null)}><form className="user-modal subscription-filter-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveFilter}>
-      <div className="modal-heading"><div><span className="eyebrow">节点过滤</span><h3>{filterEditor.name}</h3></div><button type="button" disabled={filterEditor.aiBusy} onClick={() => setFilterEditor(null)}><X /></button></div>
+    {<section className="panel combo-panel">
+      <div className="combo-panel-head"><h3>组合配置表</h3><button className="filter-button" disabled={comboBusy} onClick={() => setComboEditor({ name: "", subscriptionIds: [], strategy: "smart", rotateIntervalSeconds: 1800, crossRegionIntervalSeconds: 259200, enabled: true, rotationPrefs: [] })}>新建组合</button></div>
+      {combos.length ? <div className="combo-list">{combos.map(combo => (
+        <article className={`combo-card ${combo.gatewayEnabled ? "is-gateway" : ""}`} key={combo.id}>
+          <div className="combo-head">
+            <div className="combo-title"><h3>{combo.name}</h3>{combo.gatewayEnabled && <b>网关节点源</b>}<em>{combo.strategyLabel}</em>{combo.rotationPrefs?.length > 0 && <em className="combo-ai-badge">因素轮换</em>}</div>
+            <div className="combo-meta"><span><HardDrives />{combo.pool?.nodeCount ?? 0} 个节点</span><span>{combo.pool?.countries?.length ? combo.pool.countries.map(item => `${item.country} ${item.count}`).join(" · ") : "—"}</span></div>
+            <div className="combo-state">
+              <div className="combo-country-list">
+                {combo.pool?.countries?.length ? combo.pool.countries.map(({ country, count, flag }) => {
+                  const st = combo.state?.countries?.[country] || {};
+                  return <div className={`combo-country-row ${st.node ? "has-exit" : ""}`} key={country}>
+                    <b>{flag || ""} {country} <small>{count}</small></b>
+                    <span className="combo-country-node" title={st.node || "尚未轮换"}>{st.node || "待轮换"}</span>
+                    <small className="combo-country-region">{st.region && st.region !== "默认" ? st.region : "未识别"}{st.lastCrossAt ? ` · ${shanghaiTime(st.lastCrossAt)} 跨区` : ""}</small>
+                  </div>;
+                }) : <div className="empty-rules">节点池为空</div>}
+              </div>
+              <div className="combo-state-meta"><span>跨地区 {combo.crossRegionIntervalSeconds >= 86400 ? `${combo.crossRegionIntervalSeconds / 86400} 天` : `${combo.crossRegionIntervalSeconds / 3600} 小时`}</span>{combo.rotationPrefs?.length > 0 && <span>按因素择优</span>}</div>
+            </div>
+            {user?.role === "admin" && <div className="combo-gateway-actions">
+              <button className={`subscription-gateway-status ${combo.gatewayEnabled ? "active" : ""}`} disabled={comboBusy || (!combo.gatewayEnabled && !combo.pool?.nodeCount)} onClick={() => comboAction(combo, combo.gatewayEnabled ? "deactivate" : "activate", combo.gatewayEnabled ? "组合已停用，网关恢复基础配置。" : "组合已设为网关节点源并热重载。")}><span />{combo.gatewayEnabled ? "网关使用中" : "用于网关"}</button>
+              <button className="filter-button" disabled={comboBusy || !combo.gatewayEnabled} onClick={() => comboAction(combo, "rotate", "已按当前策略轮换出口。")}>立即轮换</button>
+              <button className="filter-button" disabled={comboBusy || !combo.gatewayEnabled} onClick={() => comboAction(combo, "cross", "已跨地区切换出口。")}>跨地区</button>
+              <button className="filter-button" disabled={comboBusy || !combo.gatewayEnabled} onClick={() => comboAction(combo, "probe", "出口地区探测完成。")}>探测地区</button>
+            </div>}
+          </div>
+          {combo.lastError && <div className="subscription-error"><WarningCircle />{combo.lastError}</div>}
+          {nodesOpen === combo.id && <div className="combo-nodes">
+            {nodesData[combo.id]?.length ? <div className="combo-nodes-table">
+              <div className="combo-nodes-head"><span>国家</span><span>节点</span><span>出口地区</span><span>来源</span><span>出口 IP</span></div>
+              {nodesData[combo.id].map(node => <div className={`combo-node-row ${node.isCurrent ? "current" : ""}`} key={node.name}><b>{node.flag} {node.country}</b><span className="combo-node-name" title={node.name}>{node.name}{node.isCurrent && <em>当前出口</em>}</span><span>{node.region}</span><small>{node.source === "geoip" ? "出口探测" : node.source === "manual" ? "手动" : "名称"}</small><code>{node.probedIp || "—"}</code></div>)}
+            </div> : <div className="empty-rules">正在加载节点出口明细…</div>}
+          </div>}
+          {combo.deliveryPaths && <div className="combo-foot">
+            <span className="combo-foot-label"><LinkSimple />组合配置</span>
+            <div className="subscription-delivery"><AppleLogo weight="fill" /><span>Surge</span><button title="复制 Surge 配置链接" onClick={() => copyDelivery(combo, "surge")}><Copy /></button><a title="打开 Surge 配置" href={combo.deliveryPaths.surge} target="_blank" rel="noreferrer"><DownloadSimple /></a></div>
+            <div className="subscription-delivery"><FileCode weight="fill" /><span>Clash / Mihomo</span><button title="复制 Clash/Mihomo 配置链接" onClick={() => copyDelivery(combo, "clash")}><Copy /></button><a title="打开 Clash/Mihomo 配置" href={combo.deliveryPaths.clash} target="_blank" rel="noreferrer"><DownloadSimple /></a></div>
+            <button className="filter-button" disabled={comboBusy} onClick={() => toggleComboNodes(combo)}>{nodesOpen === combo.id ? "收起出口明细" : "节点出口明细"}</button>
+            <button className="filter-button" disabled={comboBusy} onClick={() => confirm(`轮换「${combo.name}」的组合配置链接？旧链接会立即失效。`) && comboAction(combo, "rotate-token", "组合配置链接已轮换。")}><LinkSimple />轮换链接</button>
+            <button className="filter-button" disabled={comboBusy} onClick={() => setComboEditor({ id: combo.id, name: combo.name, subscriptionIds: [...(combo.subscriptionIds || [])], strategy: combo.strategy, rotateIntervalSeconds: combo.rotateIntervalSeconds, crossRegionIntervalSeconds: combo.crossRegionIntervalSeconds, enabled: combo.enabled, rotationPrefs: [...(combo.rotationPrefs || [])] })}>编辑</button>
+            <button className="filter-button danger-link" disabled={comboBusy} onClick={() => confirm(`删除组合「${combo.name}」？`) && comboAction(combo, "delete", "组合已删除。")}>删除</button>
+          </div>}
+        </article>
+      ))}</div> : <div className="empty-rules">还没有组合；把多个订阅合并成节点池，生成一份合并配置供客户端使用。</div>}
+    </section>}
+    {editor && <div className="modal-backdrop" onMouseDown={() => setEditor(null)}><form className="user-modal subscription-modal" role="dialog" aria-modal="true" aria-labelledby="subscription-editor-title" onMouseDown={event => event.stopPropagation()} onSubmit={save}><div className="modal-heading"><div><span className="eyebrow">节点来源</span><h3 id="subscription-editor-title">{editor.id ? "编辑订阅" : "添加订阅"}</h3></div><button type="button" aria-label="关闭订阅编辑器" onClick={() => setEditor(null)}><X /></button></div><label>名称<input required autoFocus value={editor.name} onChange={event => setEditor({ ...editor, name: event.target.value })} placeholder="例如 Example Provider" /></label><label>订阅地址<input required={!editor.id} type="url" value={editor.url} onChange={event => setEditor({ ...editor, url: event.target.value })} placeholder={editor.id ? "留空表示保留当前地址" : "https://example.com/subscribe"} /><small>地址视为凭据保存，不会在列表或 API 响应中明文返回。</small></label><label className="subscription-link-type">链接类型<span className="subscription-link-toggle"><button type="button" className={!editor.urlRepeatable ? "active" : ""} onClick={() => setEditor({ ...editor, urlRepeatable: false, enabled: true })}>一次性</button><button type="button" className={editor.urlRepeatable ? "active" : ""} onClick={() => setEditor({ ...editor, urlRepeatable: true })}>可重复</button></span></label>{editor.urlRepeatable ? <div className="modal-fields"><label>刷新周期<select value={editor.interval} onChange={event => setEditor({ ...editor, interval: Number(event.target.value) })}><option value={3600}>1 小时</option><option value={21600}>6 小时</option><option value={43200}>12 小时</option><option value={86400}>24 小时</option><option value={604800}>7 天</option></select></label><label className="subscription-enabled">自动刷新<span><input type="checkbox" checked={editor.enabled} onChange={event => setEditor({ ...editor, enabled: event.target.checked })} />启用</span></label></div> : <p className="subscription-onetime-hint">一次性链接：导入时拉取一次，之后不自动刷新；更新节点请重新获取订阅链接后再次导入。</p>}<button className="primary-button modal-submit" disabled={Boolean(busy)}>{busy ? "正在保存与解析…" : "保存订阅"}</button></form></div>}
+    {comboEditor && <div className="modal-backdrop" onMouseDown={() => setComboEditor(null)}><form className="user-modal subscription-modal combo-editor-modal" role="dialog" aria-modal="true" aria-labelledby="combo-editor-title" onMouseDown={event => event.stopPropagation()} onSubmit={saveCombo}><div className="modal-heading"><div><span className="eyebrow">订阅组合</span><h3 id="combo-editor-title">{comboEditor.id ? "编辑组合" : "新建组合"}</h3></div><button type="button" aria-label="关闭组合编辑器" onClick={() => setComboEditor(null)}><X /></button></div><label>组合名称<input required autoFocus value={comboEditor.name} onChange={event => setComboEditor({ ...comboEditor, name: event.target.value })} placeholder="例如 主力组合" /></label><label>包含订阅<div className="combo-subscription-picker">{items.map(item => <label key={item.id} className="combo-pick"><input type="checkbox" checked={comboEditor.subscriptionIds.includes(item.id)} onChange={event => setComboEditor({ ...comboEditor, subscriptionIds: event.target.checked ? [...comboEditor.subscriptionIds, item.id] : comboEditor.subscriptionIds.filter(id => id !== item.id) })} /><span>{item.name}</span><small>{item.nodeCount || 0} 节点</small></label>)}</div></label><div className="modal-fields"><label>地区内轮换间隔<select value={comboEditor.rotateIntervalSeconds} onChange={event => setComboEditor({ ...comboEditor, rotateIntervalSeconds: Number(event.target.value) })}><option value={900}>15 分钟</option><option value={1800}>30 分钟</option><option value={3600}>1 小时</option><option value={21600}>6 小时</option><option value={86400}>1 天</option></select></label><label>跨地区间隔<select value={comboEditor.crossRegionIntervalSeconds} onChange={event => setComboEditor({ ...comboEditor, crossRegionIntervalSeconds: Number(event.target.value) })}><option value={43200}>12 小时</option><option value={86400}>1 天</option><option value={259200}>3 天</option><option value={604800}>7 天</option></select></label></div><div className="modal-fields"><label className="subscription-enabled">轮换<span><input type="checkbox" checked={comboEditor.enabled} onChange={event => setComboEditor({ ...comboEditor, enabled: event.target.checked })} />启用</span></label></div><div className="rotation-prefs-editor"><span className="rotation-prefs-title">轮换偏好 <small>勾选后参与排序，数字越小优先级越高</small></span>{ROTATION_FACTORS.map(factor => {
+    const prefs = comboEditor.rotationPrefs || [];
+    const enabled = prefs.includes(factor.key);
+    const order = enabled ? prefs.indexOf(factor.key) + 1 : 0;
+    const toggle = () => setComboEditor({ ...comboEditor, rotationPrefs: enabled ? prefs.filter(k => k !== factor.key) : [...prefs, factor.key] });
+    const move = delta => {
+      const idx = prefs.indexOf(factor.key);
+      const swap = idx + delta;
+      if (idx < 0 || swap < 0 || swap >= prefs.length) return;
+      const next = [...prefs];
+      [next[idx], next[swap]] = [next[swap], next[idx]];
+      setComboEditor({ ...comboEditor, rotationPrefs: next });
+    };
+    return <label key={factor.key} className={`rotation-factor-row ${enabled ? "on" : ""}`}><input type="checkbox" checked={enabled} onChange={toggle} /><span className="rotation-factor-name">{factor.label}</span>{enabled && <span className="rotation-factor-order">{order}</span>}<span className="rotation-factor-actions"><button type="button" disabled={!enabled || order <= 1} onClick={event => { event.preventDefault(); move(-1); }} aria-label="上移">↑</button><button type="button" disabled={!enabled || order >= prefs.length} onClick={event => { event.preventDefault(); move(1); }} aria-label="下移">↓</button></span></label>;
+  })}</div><button className="primary-button modal-submit" disabled={comboBusy}>{comboBusy ? "处理中…" : "保存组合"}</button></form></div>}
+    {filterEditor && <div className="modal-backdrop" onMouseDown={() => !filterEditor.aiBusy && setFilterEditor(null)}><form className="user-modal subscription-filter-modal" role="dialog" aria-modal="true" aria-labelledby="filter-editor-title" onMouseDown={event => event.stopPropagation()} onSubmit={saveFilter}>
+      <div className="modal-heading"><div><span className="eyebrow">节点过滤</span><h3 id="filter-editor-title">{filterEditor.name}</h3></div><button type="button" aria-label="关闭节点过滤" disabled={filterEditor.aiBusy} onClick={() => setFilterEditor(null)}><X /></button></div>
       <div className="filter-preview-grid"><span><small>原始节点</small><strong>{filterEditor.preview?.total ?? 0}</strong></span><span><small>保留</small><strong>{filterEditor.preview?.kept ?? 0}</strong></span><span><small>排除</small><strong>{filterEditor.preview?.excluded ?? 0}</strong></span><span><small>改名</small><strong>{filterEditor.preview?.renamed ?? 0}</strong></span></div>
       <section className="ai-filter-assistant"><div><Lightning weight="fill" /><span><strong>AI 自动识别</strong><b>{data.ai?.configured ? `${data.ai.providerLabel} · ${data.ai.model}` : "模型尚未配置"}</b></span></div><textarea value={filterEditor.instruction} onChange={event => setFilterEditor({ ...filterEditor, instruction: event.target.value })} placeholder="可选：例如保留家宽节点，排除倍率大于 2 的节点" /><button type="button" disabled={!data.ai?.configured || filterEditor.aiBusy} onClick={analyzeFilter}>{filterEditor.aiBusy ? "正在分析节点…" : "生成过滤建议"}</button></section>
       {filterEditor.analysis?.reason && <div className="ai-filter-result"><strong>{Math.round(Number(filterEditor.analysis.confidence || 0) * 100)}% 置信度</strong><span>{filterEditor.analysis.reason}</span></div>}
-      <div className="filter-form-grid"><label>包含正则<input value={filterEditor.includeRegex} onChange={event => setFilterEditor({ ...filterEditor, includeRegex: event.target.value, source: "manual", analysis: {} })} placeholder="留空表示保留所有地区节点" /></label><label>排除正则<input value={filterEditor.excludeRegex} onChange={event => setFilterEditor({ ...filterEditor, excludeRegex: event.target.value, source: "manual", analysis: {} })} placeholder="剩余流量|到期|官网" /></label></div>
+      <div className="filter-form-grid"><label>包含正则<input autoFocus value={filterEditor.includeRegex} onChange={event => setFilterEditor({ ...filterEditor, includeRegex: event.target.value, source: "manual", analysis: {} })} placeholder="留空表示保留所有地区节点" /></label><label>排除正则<input value={filterEditor.excludeRegex} onChange={event => setFilterEditor({ ...filterEditor, excludeRegex: event.target.value, source: "manual", analysis: {} })} placeholder="剩余流量|到期|官网" /></label></div>
       <label>排除关键词<textarea value={filterEditor.excludeKeywords} onChange={event => setFilterEditor({ ...filterEditor, excludeKeywords: event.target.value, source: "manual", analysis: {} })} placeholder={"每行一个，例如：\n套餐\n流量重置"} /></label>
       <label>节点改名规则<textarea value={filterEditor.renameRules} onChange={event => setFilterEditor({ ...filterEditor, renameRules: event.target.value, source: "manual", analysis: {} })} placeholder={"每行一条：正则 => 替换内容\nHong Kong => 香港\nUSA Seattle => 美国西雅图"} /></label>
       {filterEditor.previewError && <div className="filter-preview-error"><WarningCircle />{filterEditor.previewError}</div>}
@@ -642,10 +865,10 @@ function SubscriptionsPage({ user }) {
       {filterEditor.preview?.renamedPreview?.length > 0 && <div className="filter-node-preview renamed"><span>将改名</span>{filterEditor.preview.renamedPreview.map((item, index) => <code key={`${item.from}-${index}`}>{item.from} → {item.to}</code>)}</div>}
       <button className="primary-button modal-submit" disabled={Boolean(busy) || filterEditor.aiBusy || filterEditor.previewBusy || Boolean(filterEditor.previewError)}>{busy ? "正在应用…" : "保存并应用"}</button>
     </form></div>}
-    {aiEditor && <div className="modal-backdrop" onMouseDown={() => setAiEditor(null)}><form className="user-modal ai-settings-modal" onMouseDown={event => event.stopPropagation()} onSubmit={saveAISettings}>
-      <div className="modal-heading"><div><span className="eyebrow">全局配置</span><h3>AI 模型</h3></div><button type="button" onClick={() => setAiEditor(null)}><X /></button></div>
+    {aiEditor && <div className="modal-backdrop" onMouseDown={() => setAiEditor(null)}><form className="user-modal ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-editor-title" onMouseDown={event => event.stopPropagation()} onSubmit={saveAISettings}>
+      <div className="modal-heading"><div><span className="eyebrow">全局配置</span><h3 id="ai-editor-title">AI 模型</h3></div><button type="button" aria-label="关闭 AI 设置" onClick={() => setAiEditor(null)}><X /></button></div>
       <div className="ai-provider-picker"><button type="button" className={aiEditor.provider === "deepseek" ? "active" : ""} onClick={() => setAiEditor({ ...aiEditor, provider: "deepseek", model: aiEditor.provider === "deepseek" ? aiEditor.model : "deepseek-chat", apiKeyConfigured: aiEditor.originalProvider === "deepseek" && aiEditor.originalKeyConfigured, apiKey: "", clearApiKey: false })}>DeepSeek</button><button type="button" className={aiEditor.provider === "openrouter" ? "active" : ""} onClick={() => setAiEditor({ ...aiEditor, provider: "openrouter", model: aiEditor.provider === "openrouter" ? aiEditor.model : "deepseek/deepseek-chat-v3.1", apiKeyConfigured: aiEditor.originalProvider === "openrouter" && aiEditor.originalKeyConfigured, apiKey: "", clearApiKey: false })}>OpenRouter</button></div>
-      <label>模型名称<input required value={aiEditor.model} onChange={event => setAiEditor({ ...aiEditor, model: event.target.value })} placeholder={aiEditor.provider === "deepseek" ? "deepseek-chat" : "provider/model"} /></label>
+      <label>模型名称<input required autoFocus value={aiEditor.model} onChange={event => setAiEditor({ ...aiEditor, model: event.target.value })} placeholder={aiEditor.provider === "deepseek" ? "deepseek-chat" : "provider/model"} /></label>
       <label>API Key<input required={!aiEditor.apiKeyConfigured} type="password" autoComplete="new-password" value={aiEditor.apiKey} onChange={event => setAiEditor({ ...aiEditor, apiKey: event.target.value, clearApiKey: false })} placeholder={aiEditor.apiKeyConfigured ? "已配置；留空表示保留" : "输入此提供商的 API Key"} /></label>
       {aiEditor.apiKeyConfigured && <label className="subscription-enabled">移除现有密钥<span><input type="checkbox" checked={aiEditor.clearApiKey} onChange={event => setAiEditor({ ...aiEditor, clearApiKey: event.target.checked, apiKey: "" })} />清除</span></label>}
       <div className="ai-security-note"><ShieldCheck weight="fill" /><span>模型只接收节点名称和协议类型；密钥不会返回给浏览器。</span></div>
@@ -734,7 +957,6 @@ export function App() {
     if (auth.required) setAuth({ checked: true, required: true, user: null });
   };
 
-  const cycleTheme = () => setTheme((current) => current === "system" ? "light" : current === "light" ? "dark" : "system");
   const refreshStrategies = async (payload) => {
     if (payload) { setStrategies(payload); return; }
     try { setStrategies(await api.strategies()); }
@@ -780,9 +1002,9 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar page={visiblePage} setPage={navigatePage} collapsed={collapsed} setCollapsed={setCollapsed} online={dashboard.status.online} theme={theme} cycleTheme={cycleTheme} onAccount={() => setPasswordDialog(true)} onLogout={doLogout} user={auth.user} />
+      <Sidebar page={visiblePage} setPage={navigatePage} collapsed={collapsed} setCollapsed={setCollapsed} online={dashboard.status.online} theme={theme} setTheme={setTheme} onAccount={() => setPasswordDialog(true)} onLogout={doLogout} user={auth.user} />
       <div className="main-shell">
-        <Topbar title={title} online={dashboard.status.online} theme={theme} cycleTheme={cycleTheme} onAccount={() => setPasswordDialog(true)} onLogout={doLogout} user={auth.user} />
+        <Topbar title={title} online={dashboard.status.online} theme={theme} setTheme={setTheme} onAccount={() => setPasswordDialog(true)} onLogout={doLogout} user={auth.user} />
         <main className="main-content">
           {backendError && <div className="inline-message is-error"><WarningCircle />数据刷新失败：{backendError}</div>}
           <PageRenderer
@@ -795,7 +1017,7 @@ export function App() {
               audit: <AuditPage data={dashboard} canManage={auth.user?.role === "admin"} />,
               strategies: <StrategiesPage strategies={strategies} onChanged={refreshStrategies} canManage />,
               rules: <RulesPage canManage />,
-              subscriptions: <SubscriptionsPage user={auth.user} />,
+              subscriptions: <SubscriptionsPage user={auth.user} onStrategiesChanged={refreshStrategies} />,
               gateway: <GatewayPage canManage />,
               users: <UsersPage demoMode={DEMO_MODE} />,
             }}

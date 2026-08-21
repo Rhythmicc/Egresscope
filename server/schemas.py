@@ -40,6 +40,8 @@ class SubscriptionRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
     interval: int = Field(default=21600, ge=900, le=2_592_000)
     enabled: bool = True
+    # 链接是否可重复访问：False=一次性（默认，导入后不自动轮询），True=可重复（允许自动刷新）。
+    urlRepeatable: bool = False
 
 
 class SubscriptionUpdateRequest(BaseModel):
@@ -47,6 +49,7 @@ class SubscriptionUpdateRequest(BaseModel):
     url: str | None = Field(default=None, min_length=8, max_length=4096)
     interval: int | None = Field(default=None, ge=900, le=2_592_000)
     enabled: bool | None = None
+    urlRepeatable: bool | None = None
 
 
 class NodeRenameRule(BaseModel):
@@ -132,3 +135,38 @@ class GitHubSyncRequest(BaseModel):
     branch: str = Field(default="", max_length=200)
     path: str = Field(default="", max_length=500)
     token: str | None = Field(default=None, min_length=1, max_length=512)
+
+
+class RotationComboRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    subscriptionIds: list[str] = Field(min_length=1, max_length=24)
+    strategy: str = Field(default="smart", pattern="^(region_sticky|latency_first|region_round_robin|round_robin|smart)$")
+    rotateIntervalSeconds: int = Field(default=1800, ge=300, le=604800)
+    crossRegionIntervalSeconds: int = Field(default=259200, ge=3600, le=2_592_000)
+    enabled: bool = True
+    # 轮换偏好：启用因素的有序优先级列表（高优先级在前）。空/缺省用默认顺序。
+    rotationPrefs: list[str] = Field(default_factory=list, max_length=6)
+
+
+class RotationComboUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    subscriptionIds: list[str] | None = Field(default=None, max_length=24)
+    strategy: str | None = Field(default=None, pattern="^(region_sticky|latency_first|region_round_robin|round_robin|smart)$")
+    rotateIntervalSeconds: int | None = Field(default=None, ge=300, le=604800)
+    crossRegionIntervalSeconds: int | None = Field(default=None, ge=3600, le=2_592_000)
+    enabled: bool | None = None
+    rotationPrefs: list[str] | None = Field(default=None, max_length=6)
+
+
+class NodeRegionSeedRequest(BaseModel):
+    subscriptionIds: list[str] = Field(default_factory=list, max_length=24)
+
+
+class NodeRegionRequest(BaseModel):
+    country: str = Field(default="", max_length=60)
+    region: str = Field(default="", max_length=120)
+
+
+class KernelDownloadRequest(BaseModel):
+    version: str = Field(min_length=1, max_length=40)
+    confirmUnverified: bool = False
