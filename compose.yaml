@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${EGRESSCOPE_PANEL_IMAGE:-rhythmlian/egresscope:0.4.0}
+    image: ${EGRESSCOPE_PANEL_IMAGE:-rhythmlian/egresscope:0.4.1}
     container_name: egresscope
     network_mode: host
     group_add:

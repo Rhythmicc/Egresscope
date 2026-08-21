@@ -2246,7 +2246,11 @@ class ComboStore:
     def delivery(self, token: str, client: str, managed_url: str | None = None) -> str:
         with self._database() as connection:
             row = connection.execute(
-                "SELECT id,name,subscription_ids,owner_id FROM rotation_combos WHERE delivery_token = ? AND enabled = 1",
+                # ``enabled`` controls automatic gateway rotation.  A combo is
+                # still a valid merged client profile when rotation is off;
+                # its delivery URL is revoked by rotating the token or deleting
+                # the combo, not by pausing the scheduler.
+                "SELECT id,name,subscription_ids,owner_id FROM rotation_combos WHERE delivery_token = ?",
                 (token,),
             ).fetchone()
         if row is None:
@@ -4930,7 +4934,7 @@ async def combo_clash_delivery(token: str) -> PlainTextResponse:
             headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="egresscope-combo.yaml"'},
         )
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="组合不存在、节点池为空或已停用") from exc
+        raise HTTPException(status_code=404, detail="组合不存在或交付链接已失效") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -4945,7 +4949,7 @@ async def combo_surge_delivery(token: str, request: Request) -> PlainTextRespons
             headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="egresscope-combo-surge.conf"'},
         )
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail="组合不存在、节点池为空或已停用") from exc
+        raise HTTPException(status_code=404, detail="组合不存在或交付链接已失效") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -95,12 +95,13 @@ class ComboStoreTests(unittest.TestCase):
         self.assertIn("🇯🇵 B 日本-东京", clash)
         self.assertIn("proxies:", clash)
 
-    def test_delivery_requires_enabled_combo(self):
-        combo = self.store.create(_user(1, "viewer"), {**_payload("停用"), "subscriptionIds": ["sub-a"]})
+    def test_delivery_remains_available_when_rotation_is_disabled(self):
+        combo = self.store.create(_user(1, "viewer"), {**_payload("暂停轮换"), "subscriptionIds": ["sub-a"]})
         self.store.update(combo["id"], _user(1, "viewer"), {"enabled": False})
         token = combo["deliveryPaths"]["clash"].split("/")[-2]
-        with self.assertRaises(KeyError):
-            self.store.delivery(token, "clash")
+        clash = self.store.delivery(token, "clash")
+        self.assertIn("🇺🇸 A 美国-洛杉矶", clash)
+        self.assertIn("proxies:", clash)
 
     def test_canonical_names_use_exit_country_city_format(self):
         # 给第二个订阅注入与 sub-a 同名的节点，验证 “<emoji> <Provider> <Country>-<City>” 格式。
