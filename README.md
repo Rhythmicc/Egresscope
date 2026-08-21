@@ -59,13 +59,13 @@ docker compose ps
 当前固定版本镜像：
 
 ```text
-rhythmlian/egresscope:0.3.0
+rhythmlian/egresscope:0.4.0
 rhythmlian/egresscope:0.3
 rhythmlian/egresscope:latest
 rhythmlian/egresscope:mihomo-1.19.29
 ```
 
-面板镜像发布 `linux/amd64`、`linux/arm64` 和 `linux/arm/v7`。Compose 默认固定到 `0.3.0`；如需跟随稳定最新版，可在 `.env` 中设置 `EGRESSCOPE_PANEL_IMAGE=rhythmlian/egresscope:latest`。
+面板镜像发布 `linux/amd64`、`linux/arm64` 和 `linux/arm/v7`。Compose 默认固定到 `0.4.0`；如需跟随稳定最新版，可在 `.env` 中设置 `EGRESSCOPE_PANEL_IMAGE=rhythmlian/egresscope:latest`。
 
 ## 必需配置
 

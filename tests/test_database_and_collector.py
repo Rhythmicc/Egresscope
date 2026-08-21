@@ -146,6 +146,42 @@ class DatabaseMigrationTests(unittest.TestCase):
             self.assertEqual(scoped_viewer["totals"]["month"], 0)
             self.assertEqual(scoped_viewer["devices"], [])
 
+    def test_dashboard_history_cache_keeps_live_connections_uncached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            database = data_dir / "egresscope.db"
+            test_settings = replace(settings, data_dir=data_dir, device_aliases_path=data_dir / "devices.json")
+            now = 1_786_610_000
+            today = _calendar_start("day", now)
+            with connect(database) as connection:
+                migrate(connection)
+                connection.execute(
+                    "INSERT INTO traffic_daily_rollups VALUES(?,?,?,?,?,?,?)",
+                    (today, "192.168.31.42", "proxy", 100, 200, 1, 1),
+                )
+            collector = TrafficCollector()
+            collector.connections = [
+                {"id": "one", "sourceIP": "192.168.31.42", "upRate": 10, "downRate": 20}
+            ]
+            with patch("server.main.settings", test_settings), patch("server.main.time.time", return_value=now):
+                first = collector.dashboard({"role": "admin", "allowedDevices": []})
+                with connect(database) as connection:
+                    connection.execute(
+                        "UPDATE traffic_daily_rollups SET down_bytes = 900 WHERE device = '192.168.31.42'",
+                    )
+                collector.connections.append(
+                    {"id": "two", "sourceIP": "192.168.31.42", "upRate": 30, "downRate": 40}
+                )
+                cached = collector.dashboard({"role": "admin", "allowedDevices": []})
+                with collector._dashboard_cache_lock:
+                    collector._dashboard_cache.clear()
+                refreshed = collector.dashboard({"role": "admin", "allowedDevices": []})
+            self.assertEqual(first["totals"]["month"], 300)
+            self.assertEqual(cached["totals"]["month"], 300, "历史聚合应复用采集批次缓存")
+            self.assertEqual(cached["totals"]["active"], 2, "活跃连接必须每次从内存快照读取")
+            self.assertEqual(cached["totals"]["downRate"], 60)
+            self.assertEqual(refreshed["totals"]["month"], 1000)
+
     def test_device_sessions_normalizes_non_list_chain_json(self):
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory)

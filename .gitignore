@@ -23,3 +23,5 @@ docs/ai-roadmap.md
 docs/page-map.md
 .pytest_cache/
 .coverage
+.audit/
+docs/DEPLOYMENT_HANDOFF.md

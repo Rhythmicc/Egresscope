@@ -27,7 +27,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${EGRESSCOPE_PANEL_IMAGE:-rhythmlian/egresscope:0.3.0}
+    image: ${EGRESSCOPE_PANEL_IMAGE:-rhythmlian/egresscope:0.4.0}
     container_name: egresscope
     network_mode: host
     group_add:
@@ -46,9 +46,11 @@ services:
       EGRESSCOPE_DEVICE_ALIASES: /data/devices.json
       EGRESSCOPE_TIMEZONE: Asia/Shanghai
       TZ: Asia/Shanghai
+      EGRESSCOPE_MIHOMO_BIN_DIR: /mihomo-bin
     volumes:
       - ./runtime/panel:/data
       - ./runtime/mihomo:/mihomo:ro
+      - ./runtime/mihomo/bin:/mihomo-bin
     depends_on: [mihomo]
     restart: unless-stopped
     read_only: true

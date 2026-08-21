@@ -2,6 +2,30 @@
 
 All notable changes to Egresscope are documented in this file.
 
+## [0.4.0] - 2026-08-21
+
+### Added
+
+- Owner-scoped combined profiles that merge multiple subscriptions into one Clash/Surge delivery and one optional gateway source.
+- Deterministic country- and city-aware exit rotation with health, latency, provider-usage, and diversity preferences.
+- Offline/online GeoIP resolution, manual region correction, and gateway exit probing.
+- Web-managed mihomo kernel staging, verification, switching, and rollback.
+- One-time subscription-link lifecycle support with persisted usage snapshots and provider-health events.
+
+### Changed
+
+- Dashboard live data refreshes once per second without overlapping requests; chart animation is disabled during live updates.
+- Dashboard historical aggregation is cached while live connections and rates remain current, reducing control-plane latency.
+- Rotation now closes only connections affected by a changed regional selector so new requests cannot coexist indefinitely on stale exits.
+- Strategy, node, rule, and traffic displays preserve provider emoji and use consistent inferred region flags when needed.
+- Wide desktop, tablet, and mobile layouts expose denser operational information without page-level overflow.
+
+### Security
+
+- Combination ownership and delivery tokens are enforced server-side; ordinary users can only combine their own subscriptions.
+- GeoIP and kernel downloads are size-limited, validated, and isolated from sensitive controller configuration.
+- Public release packaging excludes local design QA, audit screenshots, runtime databases, secrets, and deployment handoff notes.
+
 ## [0.3.0] - 2026-08-18
 
 ### Added

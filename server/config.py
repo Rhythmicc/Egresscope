@@ -24,7 +24,7 @@ class Settings:
     secure_cookie: bool = _env("EGRESSCOPE_SECURE_COOKIE", "SSSLAB_SECURE_COOKIE", "true").lower() == "true"
     retention_days: int = int(_env("EGRESSCOPE_AUDIT_RETENTION_DAYS", "SSSLAB_AUDIT_RETENTION_DAYS", "30"))
     event_retention_days: int = int(_env("EGRESSCOPE_EVENT_RETENTION_DAYS", "SSSLAB_EVENT_RETENTION_DAYS", "90"))
-    poll_interval: float = float(_env("EGRESSCOPE_POLL_INTERVAL", "SSSLAB_POLL_INTERVAL", "2"))
+    poll_interval: float = float(_env("EGRESSCOPE_POLL_INTERVAL", "SSSLAB_POLL_INTERVAL", "1"))
     device_aliases_path: Path = Path(_env("EGRESSCOPE_DEVICE_ALIASES", "SSSLAB_DEVICE_ALIASES", "/data/devices.json"))
     default_rule_sets_path: Path = Path(
         _env(
@@ -47,3 +47,13 @@ class Settings:
             "127.0.0.1,::1,198.18.0.1,172.17.0.2,172.18.0.3",
         ),
     )
+    geoip_mmdb_path: str = _env("EGRESSCOPE_GEOIP_MMDB", "SSSLAB_GEOIP_MMDB")
+    geoip_online_service: str = _env("EGRESSCOPE_GEOIP_SERVICE_URL", "SSSLAB_GEOIP_SERVICE_URL")
+    # 默认离线库下载源：jsDelivr 托管的 wp-statistics/GeoLite2-City（.mmdb.gz，定时更新，无需 key）。
+    geoip_mmdb_url: str = _env("EGRESSCOPE_GEOIP_MMDB_URL", "SSSLAB_GEOIP_MMDB_URL", "https://cdn.jsdelivr.net/npm/geolite2-city/GeoLite2-City.mmdb.gz")
+    # 出口探测：mihomo 混合端口与 IP 回显地址（探测结果用于二级地区 GeoIP 判定）。
+    # 0 表示从 mihomo 配置自动读取 mixed-port（部署端口各异，如 7890/9999）。
+    probe_mixed_port: int = int(_env("EGRESSCOPE_PROBE_MIXED_PORT", "SSSLAB_PROBE_MIXED_PORT", "0"))
+    probe_echo_url: str = _env("EGRESSCOPE_PROBE_ECHO_URL", "SSSLAB_PROBE_ECHO_URL", "https://api.ipify.org")
+    # mihomo 内核二进制暂存目录（部署时挂载给 mihomo 容器）。
+    mihomo_bin_dir: str = _env("EGRESSCOPE_MIHOMO_BIN_DIR", "SSSLAB_MIHOMO_BIN_DIR", str(Path("/data") / "mihomo-bin"))

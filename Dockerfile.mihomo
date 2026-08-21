@@ -33,5 +33,7 @@ LABEL org.opencontainers.image.title="mihomo for Egresscope" \
       org.opencontainers.image.source="https://github.com/Rhythmicc/Egresscope" \
       org.opencontainers.image.version="v1.19.29"
 
-ENTRYPOINT ["mihomo"]
-CMD ["-d", "/etc/mihomo", "-f", "/etc/mihomo/config.yaml"]
+COPY deploy/mihomo-entrypoint.sh /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

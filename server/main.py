@@ -34,6 +34,9 @@ from .config import Settings
 from .database import connect as connect_database
 from .database import migrate as migrate_database
 from .mihomo import MihomoClient
+from .geoip import COUNTRY_FLAGS, GeoIPResolver, install_mmdb_from_url, normalize_country
+from .kernel import KernelManager
+from .rotation import choose_rotation, city_of, normalize_city, pool_profiles
 from .schemas import (
     AISettingsRequest,
     ChangePasswordRequest,
@@ -42,10 +45,15 @@ from .schemas import (
     CustomRuleUpdateRequest,
     DeviceAliasesRequest,
     GitHubSyncRequest,
+    KernelDownloadRequest,
     LoginRequest,
+    NodeRegionRequest,
+    NodeRegionSeedRequest,
     RuleMoveRequest,
     RuleSetRequest,
     RuleSetUpdateRequest,
+    RotationComboRequest,
+    RotationComboUpdateRequest,
     StrategySelectRequest,
     SubscriptionRequest,
     SubscriptionAIAnalyzeRequest,
@@ -76,6 +84,9 @@ logger = logging.getLogger("egresscope")
 
 
 settings = Settings()
+_mmdb_managed_path = settings.geoip_mmdb_path or str(Path(settings.data_dir) / "geoip" / "GeoLite2-City.mmdb")
+geoip_resolver = GeoIPResolver(_mmdb_managed_path, settings.geoip_online_service)
+kernel_manager = KernelManager(settings.mihomo_bin_dir)
 DISPLAY_TIMEZONE = ZoneInfo(settings.timezone)
 INFRASTRUCTURE_SOURCE_IPS = frozenset(
     address.strip() for address in settings.infrastructure_source_ips.split(",") if address.strip()
@@ -219,8 +230,22 @@ def _traffic_summary(rows: list[Any]) -> dict[str, int]:
     return {"up": up, "down": down, "traffic": up + down}
 
 
-def _exclusive_exit_usage(rows: list[Any], expected_total: int, group_names: set[str]) -> list[dict[str, Any]]:
-    """Collapse each complete path into one mutually exclusive leaf exit mode."""
+def _region_of_node(node_name: str) -> str:
+    """从出口节点名提取地区标签（国家-城市）；城市缺省或与城邦同名时只保留国家。"""
+    name = str(node_name or "").strip()
+    country = _subscription_region(name) or ""
+    city = city_of(name) or ""
+    if not country and not city:
+        return "未归类"
+    return country if (not city or city == country) else f"{country}-{city}"
+
+
+def _exclusive_exit_usage(rows: list[Any], expected_total: int) -> list[dict[str, Any]]:
+    """Collapse each complete path into one mutually exclusive leaf exit mode.
+
+    出口粒度精确到地区（国家-城市），而非策略组或具体节点名：在“最佳/智能”轮换策略下
+    节点会轮转、项目数会随节点数膨胀，地区组合则稳定且可读。
+    """
     usage: dict[str, int] = defaultdict(int)
     for row in rows:
         raw_chain = str(row["chain"] or "")
@@ -232,9 +257,11 @@ def _exclusive_exit_usage(rows: list[Any], expected_total: int, group_names: set
         cleaned = [_clean_name(item) for item in chain if item]
         if "DIRECT" in cleaned:
             exit_mode = "DIRECT"
+        elif "出口探测" in cleaned:
+            # 探测链路流量单归为一项，避免按逐个出口节点散列到图例里撑爆图表。
+            exit_mode = "出口探测"
         else:
-            policy_path = [item for item in cleaned if item in group_names]
-            exit_mode = policy_path[-1] if policy_path else (cleaned[-1] if cleaned else "未归类")
+            exit_mode = _region_of_node(cleaned[-1] if cleaned else "")
         usage[exit_mode] += int(row["total"] or 0)
 
     attributed_total = sum(usage.values())
@@ -582,7 +609,7 @@ REGION_EMOJIS = {
     "美国": "🇺🇸",
     "新加坡": "🇸🇬",
     "英国": "🇬🇧",
-    "台湾": "🇹🇼",
+    "台湾": "🇨🇳",
     "德国": "🇩🇪",
     "其他": "🌐",
 }
@@ -1057,6 +1084,7 @@ class SubscriptionStore:
                 if ai_analysis.get(key) is not None
             },
             "usage": usage, "fetchedAt": row["fetched_at"],
+            "urlRepeatable": bool(row["url_repeatable"]), "consumedAt": row["consumed_at"],
             "nextRefreshAt": row["next_refresh_at"], "lastError": row["last_error"], "updatedAt": row["updated_at"],
             "deliveryPaths": {
                 "clash": f"/sub/{row['delivery_token']}/clash.yaml",
@@ -1071,12 +1099,17 @@ class SubscriptionStore:
             else:
                 rows = connection.execute("SELECT subscriptions.*, users.username owner_name FROM subscriptions JOIN users ON users.id = subscriptions.owner_id WHERE owner_id = ? ORDER BY created_at", (user["id"],)).fetchall()
         items = [self._public(row) for row in rows]
-        return {"subscriptions": items, "summary": {"count": len(items), "nodes": sum(item["nodeCount"] for item in items), "healthy": sum(not item["lastError"] and bool(item["fetchedAt"]) for item in items), "gateway": next((item["name"] for item in items if item["gatewayEnabled"]), None)}}
+        gateway_name = next((item["name"] for item in items if item["gatewayEnabled"]), None)
+        if gateway_name is None and user["role"] == "admin":
+            combo = combos.gateway_combo()
+            if combo is not None:
+                gateway_name = f"组合·{combo['name']}"
+        return {"subscriptions": items, "summary": {"count": len(items), "nodes": sum(item["nodeCount"] for item in items), "healthy": sum(not item["lastError"] and bool(item["fetchedAt"]) for item in items), "gateway": gateway_name}}
 
     def get(self, subscription_id: str, user: dict[str, Any]) -> dict[str, Any]:
         return self._public(self._authorize(self._row(subscription_id), user))
 
-    def create(self, user: dict[str, Any], name: str, url: str, interval: int, enabled: bool) -> str:
+    def create(self, user: dict[str, Any], name: str, url: str, interval: int, enabled: bool, url_repeatable: bool = False) -> str:
         subscription_id = secrets.token_hex(10)
         now = int(time.time())
         with _db() as connection:
@@ -1084,14 +1117,14 @@ class SubscriptionStore:
             if count >= MAX_SUBSCRIPTIONS_PER_USER:
                 raise ValueError(f"每个用户最多可创建 {MAX_SUBSCRIPTIONS_PER_USER} 个订阅")
             connection.execute(
-                "INSERT INTO subscriptions(id,owner_id,name,url,interval_seconds,enabled,gateway_enabled,delivery_token,next_refresh_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (subscription_id, user["id"], name.strip(), url.strip(), interval, int(enabled), 0, secrets.token_urlsafe(24), now, now, now),
+                "INSERT INTO subscriptions(id,owner_id,name,url,interval_seconds,enabled,gateway_enabled,url_repeatable,delivery_token,next_refresh_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (subscription_id, user["id"], name.strip(), url.strip(), interval, int(enabled), 0, int(bool(url_repeatable)), secrets.token_urlsafe(24), now, now, now),
             )
         return subscription_id
 
     def update(self, subscription_id: str, user: dict[str, Any], updates: dict[str, Any]) -> None:
         row = self._authorize(self._row(subscription_id), user)
-        mapping = {"name": "name", "url": "url", "interval": "interval_seconds", "enabled": "enabled"}
+        mapping = {"name": "name", "url": "url", "interval": "interval_seconds", "enabled": "enabled", "urlRepeatable": "url_repeatable"}
         assignments: list[str] = []
         values: list[Any] = []
         for key, column in mapping.items():
@@ -1100,8 +1133,8 @@ class SubscriptionStore:
             value = updates[key]
             if key in {"name", "url"}:
                 value = value.strip()
-            if key == "enabled":
-                value = int(value)
+            if key in {"enabled", "urlRepeatable"}:
+                value = int(bool(value))
             assignments.append(f"{column} = ?")
             values.append(value)
         if "url" in updates:
@@ -1137,6 +1170,7 @@ class SubscriptionStore:
             raise ValueError("请先成功刷新订阅，再设为网关节点源")
         with _db() as connection:
             connection.execute("UPDATE subscriptions SET gateway_enabled = 0")
+            connection.execute("UPDATE rotation_combos SET gateway_enabled = 0")
             connection.execute("UPDATE subscriptions SET gateway_enabled = 1, enabled = 1, updated_at = ? WHERE id = ?", (int(time.time()), subscription_id))
 
     def gateway_id(self) -> str | None:
@@ -1165,7 +1199,7 @@ class SubscriptionStore:
                 now = int(time.time())
                 with _db() as connection:
                     connection.execute(
-                        "UPDATE subscriptions SET source_format=?,node_count=?,raw_payload_json=?,payload_json=?,usage_json=?,fetched_at=?,next_refresh_at=?,last_error=NULL,updated_at=? WHERE id=?",
+                        "UPDATE subscriptions SET source_format=?,node_count=?,raw_payload_json=?,payload_json=?,usage_json=?,fetched_at=?,next_refresh_at=?,consumed_at=?,last_error=NULL,updated_at=? WHERE id=?",
                         (
                             source_format,
                             len(nodes),
@@ -1175,14 +1209,26 @@ class SubscriptionStore:
                             now,
                             now + int(row["interval_seconds"]),
                             now,
+                            now,
                             subscription_id,
                         ),
                     )
+            _record_gateway_event(
+                "info", "subscription", f"订阅「{row['name']}」已刷新",
+                f"解析到 {len(nodes)} 个节点",
+                {"subscriptionId": subscription_id, "nodeCount": len(nodes)},
+                event_key=f"sub:{subscription_id}:refresh:{int(time.time()) // 3600}",
+            )
         except Exception as exc:
             now = int(time.time())
             message = _sanitized_subscription_error(exc, str(row["url"]))
             with _db() as connection:
                 connection.execute("UPDATE subscriptions SET last_error=?,next_refresh_at=?,updated_at=? WHERE id=?", (message, now + min(900, int(row["interval_seconds"])), now, subscription_id))
+            _record_gateway_event(
+                "warning", "subscription", f"订阅「{row['name']}」刷新失败",
+                message, {"subscriptionId": subscription_id},
+                event_key=f"sub:{subscription_id}:refresh-fail:{int(time.time()) // 3600}",
+            )
             raise ValueError(message) from None
         refreshed = self._row(subscription_id)
         assert refreshed is not None
@@ -1267,7 +1313,10 @@ class SubscriptionStore:
 
     def due(self) -> list[str]:
         with _db() as connection:
-            rows = connection.execute("SELECT id FROM subscriptions WHERE enabled = 1 AND next_refresh_at <= ? ORDER BY next_refresh_at LIMIT 8", (int(time.time()),)).fetchall()
+            rows = connection.execute(
+                "SELECT id FROM subscriptions WHERE enabled = 1 AND url_repeatable = 1 AND next_refresh_at <= ? ORDER BY next_refresh_at LIMIT 8",
+                (int(time.time()),),
+            ).fetchall()
         return [str(row["id"]) for row in rows]
 
     def delivery(self, token: str, client: str, managed_url: str | None = None) -> str:
@@ -1283,6 +1332,15 @@ class SubscriptionStore:
         raise KeyError(client)
 
     def overlay_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        combo = combos.gateway_combo()
+        if combo is not None:
+            pool_nodes = combos.pool(combo["id"])
+            if not pool_nodes:
+                return config
+            canon = combos.canonical_names(pool_nodes)
+            overlay_nodes = [{**node, "name": canon[str(node["nodeKey"])]} for node in pool_nodes]
+            config = _overlay_subscription_nodes(config, overlay_nodes)
+            return combos.inject_groups(config, combo, pool_nodes)
         with _db() as connection:
             row = connection.execute("SELECT payload_json,name FROM subscriptions WHERE gateway_enabled = 1 LIMIT 1").fetchone()
         if not row or not row["payload_json"]:
@@ -1676,6 +1734,7 @@ class RuleWorkspace:
         async with self.lock:
             try:
                 workspace, config, enabled = await asyncio.to_thread(self.compile)
+                config = await asyncio.to_thread(combos.inject_probe, config)
                 payload = yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
                 await mihomo.reload_config(payload)
                 workspace["appliedRevision"] = workspace.get("revision", 1)
@@ -1932,6 +1991,939 @@ class GitHubSyncStore:
 github_sync = GitHubSyncStore(_db)
 
 
+class NodeRegionStore:
+    """节点二级地区索引：名称启发式预填 → 出口 GeoIP 探测覆盖 → 管理员手动纠正。
+
+    节点身份 = (subscription_id, node_name)，键为 "订阅id::节点名"。
+    """
+
+    def __init__(self, database: DatabaseFactory) -> None:
+        self._database = database
+
+    @staticmethod
+    def node_key(subscription_id: str, node_name: str) -> str:
+        return f"{subscription_id}::{node_name}"
+
+    def _row(self, key: str) -> sqlite3.Row | None:
+        with self._database() as connection:
+            return connection.execute("SELECT * FROM node_regions WHERE node_key = ?", (key,)).fetchone()
+
+    def country_of(self, node_name: str) -> str | None:
+        return _subscription_region(node_name)
+
+    def region_of(self, subscription_id: str, node_name: str) -> str:
+        """轮换决策用的地区解析器：索引（geoip/manual）优先，退回名称启发式。"""
+        row = self._row(self.node_key(subscription_id, node_name))
+        if row and row["region"]:
+            return str(row["region"])
+        return city_of(node_name) or "默认"
+
+    def profile_of(self, subscription_id: str, node_name: str) -> tuple[str, str]:
+        """(国家, 城市) 用于节点重命名：索引（geoip/manual）优先，退回名称启发式。"""
+        row = self._row(self.node_key(subscription_id, node_name))
+        country = str(row["country"]) if row and row["country"] else ""
+        region = str(row["region"]) if row and row["region"] else ""
+        if not region:
+            region = city_of(node_name) or ""
+        if not country:
+            country = _subscription_region(node_name) or ""
+        return normalize_country(country) or (_subscription_region(node_name) or ""), normalize_city(region) or ""
+
+    def set_geoip(self, subscription_id: str, node_name: str, country: str, region: str, probed_ip: str) -> None:
+        # 城邦的出口城市即城邦本身；离线库给出的区划（如 Kowloon/葵涌）归一化为城邦，
+        # 避免“香港-九龙”“香港-葵涌”这类过度细分把轮换地区和节点名拆散。
+        if country in {"香港", "新加坡"}:
+            region = country
+        key = self.node_key(subscription_id, node_name)
+        now = int(time.time())
+        with self._database() as connection:
+            connection.execute(
+                """
+                INSERT INTO node_regions(node_key,subscription_id,node_name,country,region,source,probed_ip,updated_at)
+                VALUES(?,?,?,?,?,'geoip',?,?)
+                ON CONFLICT(node_key) DO UPDATE SET
+                    country=excluded.country,region=excluded.region,source='geoip',
+                    probed_ip=excluded.probed_ip,updated_at=excluded.updated_at
+                """,
+                (key, subscription_id, node_name, country, region, probed_ip, now),
+            )
+
+    def assign_manual(self, key: str, country: str, region: str) -> None:
+        try:
+            subscription_id, node_name = key.split("::", 1)
+        except ValueError:
+            raise ValueError("节点标识格式不正确，应为 订阅id::节点名") from None
+        now = int(time.time())
+        with self._database() as connection:
+            connection.execute(
+                """
+                INSERT INTO node_regions(node_key,subscription_id,node_name,country,region,source,probed_ip,updated_at)
+                VALUES(?,?,?,?,?,'manual','',?)
+                ON CONFLICT(node_key) DO UPDATE SET
+                    country=excluded.country,region=excluded.region,source='manual',updated_at=excluded.updated_at
+                """,
+                (key, subscription_id, node_name, country.strip() or "", region.strip(), now),
+            )
+
+    def seed_pool(self, pool_nodes: list[dict[str, Any]]) -> int:
+        """为组合节点池批量预填地区（名称启发式），已存在的条目保留。"""
+        seeded = 0
+        now = int(time.time())
+        with self._database() as connection:
+            for node in pool_nodes:
+                key = self.node_key(str(node["subscriptionId"]), str(node["name"]))
+                row = connection.execute("SELECT region FROM node_regions WHERE node_key = ?", (key,)).fetchone()
+                if row and row["region"]:
+                    continue
+                region = city_of(str(node["name"])) or "默认"
+                country = _subscription_region(str(node["name"])) or ""
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO node_regions(node_key,subscription_id,node_name,country,region,source,probed_ip,updated_at)
+                    VALUES(?,?,?,?,?,'name','',?)
+                    """,
+                    (key, str(node["subscriptionId"]), str(node["name"]), country, region, now),
+                )
+                seeded += 1
+        return seeded
+
+    def list(self, subscription_id: str | None = None) -> list[dict[str, Any]]:
+        with self._database() as connection:
+            if subscription_id:
+                rows = connection.execute(
+                    "SELECT * FROM node_regions WHERE subscription_id = ? ORDER BY node_name", (subscription_id,)
+                ).fetchall()
+            else:
+                rows = connection.execute("SELECT * FROM node_regions ORDER BY node_name").fetchall()
+        return [dict(row) for row in rows]
+
+
+node_regions_store = NodeRegionStore(_db)
+
+class ComboStore:
+    """组合配置表：合并多个订阅为一个节点池，并调度每国家“智能”组的地区感知出口轮换。"""
+
+    def __init__(self, database: DatabaseFactory, regions: Any | None = None) -> None:
+        self._database = database
+        self._regions = regions if regions is not None else node_regions_store
+
+    def _public(self, row: sqlite3.Row) -> dict[str, Any]:
+        state = json.loads(row["state_json"] or "{}")
+        delivery_token = str(row["delivery_token"] or "")
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "ownerId": row["owner_id"],
+            "subscriptionIds": json.loads(row["subscription_ids"] or "[]"),
+            # 轮换策略字段已弃用：轮换行为固定为“智能”（同国家同地区→跨地区，不跨国家）。
+            "strategy": "smart",
+            "strategyLabel": "智能",
+            "rotateIntervalSeconds": row["rotate_interval_seconds"],
+            "crossRegionIntervalSeconds": row["cross_region_interval_seconds"],
+            "enabled": bool(row["enabled"]),
+            "gatewayEnabled": bool(row["gateway_enabled"]),
+            "rotationPrefs": json.loads(row["rotation_prefs"] or "[]"),
+            "state": state,
+            "lastError": row["last_error"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+            "deliveryPaths": (
+                {"clash": f"/sub/combo/{delivery_token}/clash.yaml", "surge": f"/sub/combo/{delivery_token}/surge.conf"}
+                if delivery_token
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _authorize(row: sqlite3.Row | None, user: dict[str, Any]) -> sqlite3.Row:
+        if row is None or (user["role"] != "admin" and int(row["owner_id"]) != int(user["id"])):
+            raise KeyError("combo")
+        return row
+
+    def list(self, user: dict[str, Any]) -> list[dict[str, Any]]:
+        with self._database() as connection:
+            if user["role"] == "admin":
+                rows = connection.execute("SELECT * FROM rotation_combos ORDER BY gateway_enabled DESC, created_at").fetchall()
+            else:
+                rows = connection.execute("SELECT * FROM rotation_combos WHERE owner_id = ? ORDER BY created_at", (user["id"],)).fetchall()
+        return [self._public(row) for row in rows]
+
+    def get(self, combo_id: str) -> dict[str, Any]:
+        with self._database() as connection:
+            row = connection.execute("SELECT * FROM rotation_combos WHERE id = ?", (combo_id,)).fetchone()
+        if row is None:
+            raise KeyError(combo_id)
+        return self._public(row)
+
+    def get_authorized(self, combo_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        return self._public(self._authorize(self._row(combo_id), user))
+
+    def _row(self, combo_id: str) -> sqlite3.Row | None:
+        with self._database() as connection:
+            return connection.execute("SELECT * FROM rotation_combos WHERE id = ?", (combo_id,)).fetchone()
+
+    def _validate_subscriptions(self, subscription_ids: list[str], user: dict[str, Any]) -> list[str]:
+        unique = list(dict.fromkeys(str(item) for item in subscription_ids if item))
+        with self._database() as connection:
+            for subscription_id in unique:
+                if user["role"] == "admin":
+                    row = connection.execute("SELECT id FROM subscriptions WHERE id = ?", (subscription_id,)).fetchone()
+                else:
+                    row = connection.execute("SELECT id FROM subscriptions WHERE id = ? AND owner_id = ?", (subscription_id, user["id"])).fetchone()
+                if row is None:
+                    raise ValueError("组合只能包含你有权访问的订阅")
+        return unique
+
+    def create(self, user: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        subscription_ids = self._validate_subscriptions(payload["subscriptionIds"], user)
+        if not subscription_ids:
+            raise ValueError("组合至少需要一个订阅")
+        combo_id = secrets.token_hex(8)
+        owner_id = 0 if user["role"] == "admin" else int(user["id"])
+        now = int(time.time())
+        with self._database() as connection:
+            connection.execute(
+                """
+                INSERT INTO rotation_combos(id,name,subscription_ids,strategy,rotate_interval_seconds,cross_region_interval_seconds,enabled,gateway_enabled,rotation_prefs,state_json,last_error,owner_id,delivery_token,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,0,?, '{}','',?,?,?,?)
+                """,
+                (combo_id, payload["name"].strip(), json.dumps(subscription_ids, separators=(",", ":")), payload["strategy"],
+                 payload["rotateIntervalSeconds"], payload["crossRegionIntervalSeconds"], int(payload["enabled"]),
+                 json.dumps(payload.get("rotationPrefs") or [], separators=(",", ":")),
+                 owner_id, secrets.token_urlsafe(24), now, now),
+            )
+        return self.get(combo_id)
+
+    def update(self, combo_id: str, user: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+        row = self._authorize(self._row(combo_id), user)
+        mapping = {
+            "name": "name",
+            "subscriptionIds": "subscription_ids",
+            "strategy": "strategy",
+            "rotateIntervalSeconds": "rotate_interval_seconds",
+            "crossRegionIntervalSeconds": "cross_region_interval_seconds",
+            "enabled": "enabled",
+            "rotationPrefs": "rotation_prefs",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, column in mapping.items():
+            if key not in updates:
+                continue
+            value = updates[key]
+            if key == "subscriptionIds":
+                value = json.dumps(self._validate_subscriptions(list(value), user), separators=(",", ":"))
+            elif key == "enabled":
+                value = int(value)
+            elif key == "rotationPrefs":
+                value = json.dumps(list(value), separators=(",", ":"))
+            assignments.append(f"{column} = ?")
+            values.append(value)
+        if assignments:
+            if updates.get("enabled") is False and bool(row["gateway_enabled"]):
+                assignments.append("gateway_enabled = 0")
+            assignments.append("updated_at = ?")
+            values.extend((int(time.time()), combo_id))
+            with self._database() as connection:
+                connection.execute(f"UPDATE rotation_combos SET {', '.join(assignments)} WHERE id = ?", values)
+        return self.get(combo_id)
+
+    def delete(self, combo_id: str, user: dict[str, Any]) -> bool:
+        row = self._authorize(self._row(combo_id), user)
+        with self._database() as connection:
+            connection.execute("DELETE FROM rotation_combos WHERE id = ?", (combo_id,))
+        return bool(row["gateway_enabled"])
+
+    def rotate_delivery_token(self, combo_id: str, user: dict[str, Any]) -> dict[str, Any]:
+        self._authorize(self._row(combo_id), user)
+        with self._database() as connection:
+            connection.execute(
+                "UPDATE rotation_combos SET delivery_token = ?, updated_at = ? WHERE id = ?",
+                (secrets.token_urlsafe(24), int(time.time()), combo_id),
+            )
+        return self.get(combo_id)
+
+    def delivery(self, token: str, client: str, managed_url: str | None = None) -> str:
+        with self._database() as connection:
+            row = connection.execute(
+                "SELECT id,name,subscription_ids,owner_id FROM rotation_combos WHERE delivery_token = ? AND enabled = 1",
+                (token,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(token)
+        pool_nodes = self.pool(str(row["id"]))
+        if not pool_nodes:
+            raise ValueError("组合节点池为空")
+        canon = self.canonical_names(pool_nodes)
+        nodes = [{**node, "name": canon[str(node["nodeKey"])]} for node in pool_nodes]
+        if client == "clash":
+            return _clash_delivery(str(row["name"]), nodes)
+        if client == "surge":
+            return _surge_delivery(str(row["name"]), nodes, managed_url)
+        raise KeyError(client)
+
+    def pool(self, combo_id: str) -> list[dict[str, Any]]:
+        row = self._row(combo_id)
+        if row is None:
+            raise KeyError(combo_id)
+        owner_id = int(row["owner_id"])
+        merged: dict[str, dict[str, Any]] = {}
+        with self._database() as connection:
+            for subscription_id in json.loads(row["subscription_ids"] or "[]"):
+                if owner_id == 0:
+                    sub = connection.execute("SELECT payload_json FROM subscriptions WHERE id = ?", (subscription_id,)).fetchone()
+                else:
+                    sub = connection.execute("SELECT payload_json FROM subscriptions WHERE id = ? AND owner_id = ?", (subscription_id, owner_id)).fetchone()
+                if not sub or not sub["payload_json"]:
+                    continue
+                for node in json.loads(sub["payload_json"]):
+                    name = str(node.get("name") or "")
+                    if not name:
+                        continue
+                    key = f"{subscription_id}::{name}"
+                    merged.setdefault(key, {**node, "subscriptionId": subscription_id, "nodeKey": key})
+        return list(merged.values())
+
+    def _provider_labels(self, pool_nodes: list[dict[str, Any]]) -> dict[str, str]:
+        """订阅 id → 展示用 provider 标签（订阅名；组合内重名订阅追加短 id 区分）。"""
+        sub_ids = list(dict.fromkeys(str(node.get("subscriptionId") or "") for node in pool_nodes if node.get("subscriptionId")))
+        names: dict[str, str] = {}
+        counts: dict[str, int] = defaultdict(int)
+        with self._database() as connection:
+            for sub_id in sub_ids:
+                row = connection.execute("SELECT name FROM subscriptions WHERE id = ?", (sub_id,)).fetchone()
+                name = str(row["name"]) if row else sub_id[:6]
+                names[sub_id] = name
+                counts[name] += 1
+        return {
+            sub_id: (names[sub_id] if counts[names[sub_id]] == 1 else f"{names[sub_id]}·{sub_id[:6]}")
+            for sub_id in sub_ids
+        }
+
+    @staticmethod
+    def _node_flag(name: str, country: str | None) -> str:
+        """节点名自带的国旗（前缀 emoji）优先，否则按国家推断，未知用 🌐。"""
+        stripped = name.lstrip()
+        flag_match = re.match(r"[\U0001F1E6-\U0001F1FF]{2}", stripped)
+        if flag_match:
+            return flag_match.group(0)
+        if country and country in REGION_EMOJIS:
+            return REGION_EMOJIS[country]
+        return "🌐"
+
+    def canonical_names(self, pool_nodes: list[dict[str, Any]]) -> dict[str, str]:
+        """nodeKey → mihomo 代理名，统一重命名为 “<emoji> <Provider> <Country>-<City>[-id]”。
+
+        - emoji：出口国家的国旗；
+        - Provider：订阅名（组合内重名订阅追加短 id 区分）；
+        - Country-City：出口国家与城市（geoip/manual 索引优先，退回名称启发式）；
+        - [-id]：同 provider+国家+城市 出现多次时按原始节点名排序追加 -1/-2/… 去重。
+        """
+        providers = self._provider_labels(pool_nodes)
+        # 解析每个节点的出口国家/城市，再按 (订阅, 国家, 城市) 分组稳定去重。
+        grouped: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+        profiles: dict[str, tuple[str, str, str]] = {}
+        for node in pool_nodes:
+            key = str(node.get("nodeKey") or "")
+            sub_id = str(node.get("subscriptionId") or "")
+            name = str(node.get("name") or "")
+            country, city = self._regions.profile_of(sub_id, name)
+            country = country or "未知"
+            profiles[key] = (sub_id, country, city)
+        for key in sorted(profiles, key=lambda item: (profiles[item][0], profiles[item][2], item)):
+            sub_id, country, city = profiles[key]
+            grouped[(sub_id, country, city)].append(key)
+        result: dict[str, str] = {}
+        for (sub_id, country, city), keys in grouped.items():
+            provider = providers.get(sub_id, sub_id[:6])
+            flag = COUNTRY_FLAGS.get(country, "🌐")
+            # 城市占位符“默认”（离线库对部分机房 IP 只有国家级数据）与城市==国家
+            # 的城邦（如香港/新加坡）都不写入城市段，避免“香港-默认”“新加坡-新加坡”。
+            base = country if (not city or city == "默认" or city == country) else f"{country}-{city}"
+            for index, key in enumerate(keys):
+                suffix = f"-{index + 1}" if len(keys) > 1 else ""
+                result[key] = f"{flag} {provider} {base}{suffix}"
+        return result
+
+    def pool_profiles(self, combo_id: str) -> tuple[list[dict[str, str | None]], dict[str, str]]:
+        """组合节点池的分类画像 + 规范名映射（地区来自 NodeRegionStore，按 订阅id::节点名 索引）。
+
+        国家与城市都取出口判定结果（geoip/manual 优先，退回名称启发式），
+        与节点重命名口径一致，确保“绝不跨国家”按真实出口国家约束。
+        """
+        pool_nodes = self.pool(combo_id)
+        canon = self.canonical_names(pool_nodes)
+        providers = self._provider_labels(pool_nodes)
+        profiles: list[dict[str, str | None]] = []
+        for node in pool_nodes:
+            sub_id = str(node["subscriptionId"])
+            country, region = self._regions.profile_of(sub_id, str(node["name"]))
+            profiles.append(
+                {
+                    "name": canon[str(node["nodeKey"])],
+                    "provider": providers.get(sub_id, sub_id[:6]),
+                    "country": country or "未知",
+                    "region": region or "默认",
+                }
+            )
+        return profiles, canon
+
+    def pool_summary(self, combo_id: str) -> dict[str, Any]:
+        nodes = self.pool(combo_id)
+        by_country: dict[str, int] = defaultdict(int)
+        flags: dict[str, str] = {}
+        for node in nodes:
+            country, _ = self._regions.profile_of(str(node["subscriptionId"]), str(node["name"]))
+            country = country or "其他"
+            by_country[country] += 1
+            flags.setdefault(country, COUNTRY_FLAGS.get(country, "🌐"))
+        return {
+            "nodeCount": len(nodes),
+            "countries": [
+                {"country": name, "count": count, "flag": flags.get(name, "🌐")}
+                for name, count in sorted(by_country.items())
+            ],
+        }
+
+    def nodes_detail(self, combo_id: str) -> list[dict[str, Any]]:
+        """组合池每个节点的出口地区明细：地区、来源（出口探测/名称/手动）、出口 IP、是否当前选中。"""
+        pool_nodes = self.pool(combo_id)
+        canon = self.canonical_names(pool_nodes)
+        state = self.get(combo_id)["state"]
+        countries_state = {str(key): dict(value) for key, value in (state.get("countries") or {}).items()}
+        rows: list[dict[str, Any]] = []
+        with self._database() as connection:
+            for node in pool_nodes:
+                key = node_regions_store.node_key(str(node["subscriptionId"]), str(node["name"]))
+                row = connection.execute("SELECT region, source, probed_ip FROM node_regions WHERE node_key = ?", (key,)).fetchone()
+                country, _ = self._regions.profile_of(str(node["subscriptionId"]), str(node["name"]))
+                country = country or "其他"
+                canonical = canon[str(node["nodeKey"])]
+                region_value = str(row["region"]) if row and row["region"] else ""
+                known = bool(region_value and region_value != "默认")
+                rows.append(
+                    {
+                        "country": country,
+                        "flag": COUNTRY_FLAGS.get(country, "🌐"),
+                        "name": canonical,
+                        "region": region_value if known else "未识别",
+                        "known": known,
+                        "source": str(row["source"]) if row else "name",
+                        "probedIp": str(row["probed_ip"] or "") if row else "",
+                        "isCurrent": countries_state.get(country, {}).get("node") == canonical,
+                    }
+                )
+        return sorted(rows, key=lambda item: (item["country"], item["name"]))
+
+    def gateway_combo(self) -> dict[str, Any] | None:
+        with self._database() as connection:
+            row = connection.execute("SELECT * FROM rotation_combos WHERE gateway_enabled = 1 LIMIT 1").fetchone()
+        return self._public(row) if row else None
+
+    def activate(self, combo_id: str) -> None:
+        row = self._row(combo_id)
+        if row is None:
+            raise KeyError(combo_id)
+        if not self.pool(combo_id):
+            raise ValueError("组合节点池为空，请先添加包含节点的订阅")
+        self._regions.seed_pool(self.pool(combo_id))
+        with self._database() as connection:
+            connection.execute("UPDATE rotation_combos SET gateway_enabled = 0")
+            connection.execute("UPDATE subscriptions SET gateway_enabled = 0")
+            connection.execute(
+                "UPDATE rotation_combos SET gateway_enabled = 1, enabled = 1, updated_at = ? WHERE id = ?",
+                (int(time.time()), combo_id),
+            )
+
+    def deactivate(self, combo_id: str) -> None:
+        result = 0
+        with self._database() as connection:
+            result = connection.execute("UPDATE rotation_combos SET gateway_enabled = 0, updated_at = ? WHERE id = ?", (int(time.time()), combo_id)).rowcount
+        if result != 1:
+            raise KeyError(combo_id)
+
+    def inject_groups(self, config: dict[str, Any], combo: dict[str, Any], pool_nodes: list[dict[str, Any]]) -> dict[str, Any]:
+        """为组合池升级每国家的 {父名}最佳/{父名}均衡/{父名}智能 组，并接入入口。
+
+        - 复用基座里已有的地区父组（如 “🇺🇸 美国”），不再新建并行家族；
+        - 把基座中误标的 LoadBalance “{父名}智能” 改名为 “{父名}均衡”（名如其意）；
+        - {父名}最佳：URLTest；{父名}均衡：LoadBalance；{父名}智能：Selector，面板按
+          “同国家同地区→跨地区（3 天/手动），不跨国家”轮换；
+        - 父组成员确保 [最佳, 均衡, 智能]（保留手动切换/DIRECT 等既有成员）；
+        - 入口（节点选择/手动选择等）成员指向各国父组。
+        """
+        groups = config.setdefault("proxy-groups", [])
+        existing = {str(item.get("name")) for item in groups if item.get("name")}
+        canon = self.canonical_names(pool_nodes)
+        by_country: dict[str, list[str]] = defaultdict(list)
+        for node in pool_nodes:
+            country = self._regions.country_of(str(node.get("name") or "")) or "其他"
+            by_country[country].append(canon[str(node["nodeKey"])])
+        if not by_country:
+            return config
+        country_groups: list[str] = []
+        for country in sorted(by_country):
+            members = sorted(by_country[country])
+            parent = next(
+                (
+                    item for item in groups
+                    if country in str(item.get("name") or "")
+                    and str(item.get("type")) == "select"
+                    and not any(suffix in str(item.get("name")) for suffix in ("最佳", "均衡", "智能", "手动"))
+                ),
+                None,
+            )
+            base_name = str(parent.get("name")) if parent is not None else country
+            # 1. 误标的 LoadBalance “{base}智能” → “{base}均衡”（改引用）。
+            legacy_smart = next((item for item in groups if str(item.get("name")) == f"{base_name}智能"), None)
+            if legacy_smart is not None and str(legacy_smart.get("type")) == "load-balance":
+                legacy_smart["name"] = f"{base_name}均衡"
+                for other in groups:
+                    proxies = other.get("proxies")
+                    if isinstance(proxies, list):
+                        other["proxies"] = [
+                            f"{base_name}均衡" if str(item) == f"{base_name}智能" else item
+                            for item in proxies
+                        ]
+                existing.discard(f"{base_name}智能")
+                existing.add(f"{base_name}均衡")
+            # 2. 确保三件套存在（缺则创建；具体地区组不含 DIRECT）。
+            definitions = {
+                "最佳": ("url-test", {"url": DELIVERY_TEST_URL, "interval": 300}),
+                "均衡": ("load-balance", {"strategy": "round-robin"}),
+                "智能": ("select", {}),
+            }
+            for suffix, (group_type, extra) in definitions.items():
+                group_name = f"{base_name}{suffix}"
+                if group_name in existing:
+                    continue
+                entry: dict[str, Any] = {"name": group_name, "type": group_type, "proxies": [*members], **extra}
+                groups.append(entry)
+                existing.add(group_name)
+            # 3. 父组确保按 [最佳, 均衡, 智能] 排列三件套在前，其余成员（手动切换等）保持在后。
+            trio = [f"{base_name}最佳", f"{base_name}均衡", f"{base_name}智能"]
+            if parent is None:
+                groups.append({"name": country, "type": "select", "proxies": [*trio]})
+                parent = groups[-1]
+            else:
+                proxies = [str(item) for item in (parent.get("proxies") or [])]
+                # 三件套（最佳/均衡/智能）全部置前且保持该顺序，缺失的补上；其余成员（手动切换等）在后。
+                ordered = [*trio, *[item for item in proxies if item not in trio]]
+                if ordered != proxies:
+                    parent["proxies"] = ordered
+            # 4. 具体地区（国家）组绝不包含 DIRECT：误切 DIRECT 会让该国家流量直接出网。
+            family_names = {f"{base_name}最佳", f"{base_name}均衡", f"{base_name}智能", str(parent["name"])}
+            for group in groups:
+                if str(group.get("name")) in family_names:
+                    group["proxies"] = [item for item in (group.get("proxies") or []) if str(item) != "DIRECT"]
+            country_groups.append(str(parent["name"]))
+        for group in groups:
+            name = str(group.get("name") or "")
+            # 入口只接 节点选择/手动选择/GLOBAL；绝不能把国家父组写进“手动切换”——
+            # 地区父组自身已包含手动切换，再反向写入会形成代理组环（mihomo 拒绝）。
+            if name in ("节点选择", "🚀 节点选择", "手动选择", "GLOBAL"):
+                proxies = [str(item) for item in (group.get("proxies") or [])]
+                added = [item for item in country_groups if item not in proxies]
+                if added:
+                    group["proxies"] = [*proxies, *added]
+        return config
+
+    def inject_probe(self, config: dict[str, Any]) -> dict[str, Any]:
+        """网关组合激活时注入出口探测组与规则：探测域名强制走“🔍 出口探测”Selector。
+
+        面板随后把该组 select 到目标节点，再经 mihomo 混合端口请求 IP 回显地址，
+        拿到的是该节点的真实出口 IP（而非入口 server 地址）。
+        """
+        combo = self.gateway_combo()
+        if combo is None:
+            return config
+        pool_nodes = self.pool(combo["id"])
+        if not pool_nodes:
+            return config
+        canon = self.canonical_names(pool_nodes)
+        group_name = "🔍 出口探测"
+        existing = {str(item.get("name")) for item in (config.get("proxy-groups") or []) if item.get("name")}
+        if group_name not in existing:
+            config.setdefault("proxy-groups", []).append(
+                {"name": group_name, "type": "select", "proxies": [*sorted({canon[str(node["nodeKey"])] for node in pool_nodes}), "DIRECT"]}
+            )
+        host = urlparse(settings.probe_echo_url).hostname
+        if host:
+            rule = f"DOMAIN-SUFFIX,{host},🔍 出口探测"
+            rules = [str(item) for item in (config.get("rules") or [])]
+            if rule not in rules:
+                config["rules"] = [rule, *rules]
+        return config
+
+    def probe_candidates(self, combo_id: str, force: bool = False) -> list[dict[str, Any]]:
+        """选择需要出口探测的节点：manual 跳过；geoip 且新鲜（7 天内）且非 force 跳过。"""
+        combo = self.get(combo_id)
+        if not combo["gatewayEnabled"]:
+            raise ValueError("只有作为网关节点源的组合可以探测出口地区")
+        pool_nodes = self.pool(combo_id)
+        now = int(time.time())
+        candidates: list[dict[str, Any]] = []
+        with self._database() as connection:
+            for node in pool_nodes:
+                key = node_regions_store.node_key(str(node["subscriptionId"]), str(node["name"]))
+                row = connection.execute("SELECT source, updated_at FROM node_regions WHERE node_key = ?", (key,)).fetchone()
+                source = str(row["source"]) if row else "name"
+                updated_at = int(row["updated_at"] or 0) if row else 0
+                if source == "manual":
+                    continue
+                if not force and source == "geoip" and now - updated_at < 7 * 86400:
+                    continue
+                candidates.append(node)
+        return candidates
+
+    async def probe_pool(self, combo_id: str, force: bool = False) -> dict[str, Any]:
+        pool_nodes = await asyncio.to_thread(self.pool, combo_id)
+        old_canon = await asyncio.to_thread(self.canonical_names, pool_nodes)
+        candidates = await asyncio.to_thread(self.probe_candidates, combo_id, force)
+        if not candidates:
+            return {"probed": 0, "failed": 0, "skipped": len(pool_nodes), "reason": "没有需要探测的节点"}
+        canon = self.canonical_names(pool_nodes)
+        proxy_url = f"http://127.0.0.1:{self._probe_mixed_port()}"
+        # 出口探测只有一个共享的 "🔍 出口探测" Selector：切换选择器与发出探测请求必须
+        # 串行，否则并发任务会互相覆盖选择器，导致出口 IP 被记录到错误的节点上。
+        semaphore = asyncio.Semaphore(1)
+        results = {"probed": 0, "failed": 0, "skipped": 0}
+
+        async def probe_one(node: dict[str, Any]) -> None:
+            async with semaphore:
+                canonical = canon[str(node["nodeKey"])]
+                try:
+                    await mihomo.select("🔍 出口探测", canonical)
+                    # 给 mihomo 一点时间让选择器生效，避免探测请求仍走上一个节点。
+                    await asyncio.sleep(0.2)
+                except httpx.HTTPError:
+                    results["failed"] += 1
+                    return
+                try:
+                    async with httpx.AsyncClient(
+                        proxy=proxy_url,
+                        timeout=httpx.Timeout(12, connect=5),
+                        trust_env=False,
+                        headers={"User-Agent": "Egresscope/0.2"},
+                    ) as client:
+                        response = await client.get(settings.probe_echo_url)
+                        response.raise_for_status()
+                        text = response.text.strip()
+                    ip = str(ipaddress.ip_address(text))
+                    geo = geoip_resolver.resolve(ip)
+                    if not geo:
+                        results["failed"] += 1
+                        return
+                    node_regions_store.set_geoip(
+                        str(node["subscriptionId"]), str(node["name"]),
+                        geo["country"], normalize_city(geo["city"]) or "默认", ip,
+                    )
+                    results["probed"] += 1
+                except (ValueError, httpx.HTTPError, OSError):
+                    results["failed"] += 1
+
+        await asyncio.gather(*(probe_one(node) for node in candidates))
+        results["skipped"] = max(0, len(candidates) - results["probed"] - results["failed"])
+        # 探测更新了出口国家/城市：若节点重命名随之变化，热重载网关配置并清空轮换旧节点引用。
+        if results["probed"] > 0:
+            new_canon = await asyncio.to_thread(self.canonical_names, pool_nodes)
+            if new_canon != old_canon:
+                await self._refresh_names(combo_id)
+        # 记录探测结果到事件日志（有失败时提升为 warning，便于专业用户追踪供应健康）。
+        await asyncio.to_thread(
+            _record_gateway_event,
+            "warning" if results["failed"] > 0 else "info",
+            "subscription",
+            "出口地区探测完成",
+            f"探测 {results['probed']} 成功、{results['failed']} 失败、跳过 {results['skipped']}",
+            {"comboId": combo_id, "probed": results["probed"], "failed": results["failed"], "skipped": results["skipped"]},
+            event_key=f"probe:{combo_id}:{int(time.time()) // 3600}",
+        )
+        return results
+
+    async def _refresh_names(self, combo_id: str) -> None:
+        """重命名后热重载网关配置；成功后清空轮换状态，让下一轮按新节点名重选。"""
+        try:
+            await rule_workspace.apply()
+        except Exception as exc:
+            self._record_error(combo_id, f"地区探测后重载配置失败：{str(exc)[:200]}")
+            return
+        with self._database() as connection:
+            connection.execute(
+                "UPDATE rotation_combos SET state_json='{}', updated_at=? WHERE id=?",
+                (int(time.time()), combo_id),
+            )
+
+    def _save_state(self, combo_id: str, state: dict[str, Any]) -> None:
+        with self._database() as connection:
+            connection.execute(
+                "UPDATE rotation_combos SET state_json = ?, last_error = '', updated_at = ? WHERE id = ?",
+                (json.dumps(state, ensure_ascii=False, separators=(",", ":")), int(time.time()), combo_id),
+            )
+
+    def _record_error(self, combo_id: str, message: str) -> None:
+        with self._database() as connection:
+            connection.execute(
+                "UPDATE rotation_combos SET last_error = ?, updated_at = ? WHERE id = ?",
+                (str(message)[:300], int(time.time()), combo_id),
+            )
+
+    def _health(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        health: dict[str, dict[str, Any]] = {}
+        for name, data in (payload.get("proxies") or {}).items():
+            if not isinstance(data, dict) or isinstance(data.get("all"), list):
+                continue
+            history = data.get("history") or []
+            delay = next((int(item["delay"]) for item in reversed(history) if item.get("delay")), None)
+            health[str(name)] = {"alive": data.get("alive") is not False, "delay": delay}
+        return health
+
+    @staticmethod
+    def _probe_mixed_port() -> int:
+        """探测用的 mihomo 混合端口：显式 env 优先，否则从 mihomo 配置自动读取，再退回 7890。"""
+        if settings.probe_mixed_port > 0:
+            return settings.probe_mixed_port
+        try:
+            config = yaml.safe_load(settings.config_path.read_text(encoding="utf-8")) or {}
+            port = int(config.get("mixed-port") or 0)
+            if port:
+                return port
+        except Exception:
+            pass
+        return 7890
+
+    @staticmethod
+    def _family_groups(payload: dict[str, Any], country: str) -> tuple[str, str]:
+        """解析该国家当前实际使用的（智能组, 父组）名称，兼容基座国旗前缀家族与裸名家族。"""
+        proxies = payload.get("proxies") or {}
+        smart = None
+        parent = None
+        for name, data in proxies.items():
+            if country not in name or not isinstance(data.get("all"), list):
+                continue
+            name_str = str(name)
+            if name_str.endswith("智能") and str(data.get("type")) == "Selector":
+                if smart is None or name_str == f"{country}智能":
+                    smart = name_str
+            elif name_str.endswith(("最佳", "均衡")):
+                continue
+            elif str(data.get("type")) == "Selector" and not any(token in name_str for token in ("手动", "轮换", "探测")):
+                if parent is None or name_str == f"{country}":
+                    parent = name_str
+        return smart or f"{country}智能", parent or f"{country}"
+
+    async def _apply_country_decision(
+        self,
+        combo: dict[str, Any],
+        country: str,
+        decision: dict[str, Any],
+        smart_group: str,
+        parent_group: str,
+        controller_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        node = str(decision.get("node") or "")
+        if not node:
+            return {"changed": False}
+
+        # mihomo keeps established connections on the node chosen when they
+        # were created.  Switching a Selector without closing those sessions
+        # therefore makes old and new exits coexist for the same device and
+        # destination.  Snapshot the affected sessions before changing the
+        # selectors, then close them after the new route is installed.
+        state = dict(self.get(combo["id"])["state"])
+        countries = dict(state.get("countries") or {})
+        entry = dict(countries.get(country) or {})
+        previous_node = str(entry.get("node") or "")
+        proxies = (controller_payload or {}).get("proxies") or {}
+        smart_state = proxies.get(smart_group) if isinstance(proxies.get(smart_group), dict) else {}
+        parent_state = proxies.get(parent_group) if isinstance(proxies.get(parent_group), dict) else {}
+        actual_smart = str(smart_state.get("now") or "")
+        actual_parent = str(parent_state.get("now") or "")
+        route_changed = (
+            (actual_smart != node if actual_smart else previous_node != node)
+            or (bool(actual_parent) and actual_parent != smart_group)
+        )
+        affected_ids: list[str] = []
+        snapshot_available = True
+        if route_changed:
+            try:
+                affected_ids = _affected_connection_ids_for_groups(
+                    await mihomo.get("/connections"),
+                    {smart_group, parent_group},
+                )
+            except httpx.HTTPError:
+                snapshot_available = False
+
+        await mihomo.select(smart_group, node)
+        await mihomo.select(parent_group, smart_group)
+        if route_changed and not snapshot_available:
+            # A transient read failure before the switch must not leave the
+            # old route alive forever: retry once after the selector update.
+            # New connections created in this tiny window are intentionally
+            # reconnected as well so the country exits from one clean state.
+            try:
+                affected_ids = _affected_connection_ids_for_groups(
+                    await mihomo.get("/connections"),
+                    {smart_group, parent_group},
+                )
+                snapshot_available = True
+            except httpx.HTTPError:
+                pass
+        closed = failed = 0
+        if affected_ids:
+            closed, failed = await mihomo.close_connections(affected_ids)
+
+        # 循环内每国都从 DB 重读最新 state：轮换是按国家逐个处理的，若沿用循环外
+        # 的快照，后写会覆盖前一个国家刚写入的条目（表现为只剩字母序最后一国）。
+        state_changed = node != previous_node
+        changed = state_changed or route_changed
+        now = int(time.time())
+        entry.update({"region": decision.get("region"), "node": node})
+        # Re-selecting every cycle restores the selector after a mihomo config
+        # reload, but it must not postpone the next scheduled rotation.
+        if state_changed or not entry.get("lastRotationAt"):
+            entry["lastRotationAt"] = now
+        if decision.get("crossed"):
+            entry["lastCrossAt"] = now
+        countries[country] = entry
+        state["countries"] = countries
+        self._save_state(combo["id"], state)
+        return {
+            "changed": changed,
+            "selectionChanged": route_changed,
+            "reason": decision.get("reason"),
+            "affectedConnections": len(affected_ids),
+            "closedConnections": closed,
+            "closeFailures": failed,
+            "snapshotAvailable": snapshot_available,
+        }
+
+    def _countries_state(self, combo: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {str(key): dict(value) for key, value in (dict(combo["state"]).get("countries") or {}).items()}
+
+    def monthly_provider_usage(self, combo_id: str) -> dict[str, int]:
+        """本月（Asia/Shanghai 自然月）按提供商聚合的出站流量，供“用量均衡”轮换因素使用。
+
+        从 flow 滚存的 chain（出站节点为末项）解析出 provider，与当前组合的提供商
+        标签（订阅名）按最长前缀匹配，兼容改名前后的新旧节点名。
+        """
+        pool_nodes = self.pool(combo_id)
+        if not pool_nodes:
+            return {}
+        providers = set(self._provider_labels(pool_nodes).values())
+        month_start = _calendar_start("month", int(time.time()))
+        with self._database() as connection:
+            rows = connection.execute(
+                "SELECT chain, SUM(up_bytes + down_bytes) total FROM traffic_flow_daily_rollups WHERE day_start >= ? GROUP BY chain",
+                (month_start,),
+            ).fetchall()
+        usage: dict[str, int] = defaultdict(int)
+        for row in rows:
+            provider = _provider_from_chain(str(row["chain"] or ""), providers)
+            if provider:
+                usage[provider] += int(row["total"] or 0)
+        return usage
+
+    async def rotate_combo(self, combo_id: str, force_cross: bool = False) -> dict[str, Any]:
+        combo = self.get(combo_id)
+        profiles, _ = self.pool_profiles(combo_id)
+        if not profiles:
+            raise ValueError("组合节点池为空")
+        try:
+            payload = await mihomo.get("/proxies")
+        except httpx.HTTPError as exc:
+            raise ValueError("mihomo 策略接口当前不可用") from exc
+        health = self._health(payload)
+        countries_state = self._countries_state(combo)
+        now = int(time.time())
+        prefs = combo.get("rotationPrefs") or None
+        usage = await asyncio.to_thread(self.monthly_provider_usage, combo_id)
+        results: list[dict[str, Any]] = []
+        for country in sorted({profile["country"] for profile in profiles if profile.get("country")}):
+            country_pool = [profile for profile in profiles if profile["country"] == country]
+            entry = countries_state.get(country) or {}
+            current = {"country": country, "region": entry.get("region"), "node": entry.get("node")} if entry.get("node") else None
+            decision = choose_rotation(
+                country_pool,
+                current,
+                health,
+                rotate_due=not force_cross,
+                cross_due=force_cross or now - int(entry.get("lastCrossAt") or 0) >= combo["crossRegionIntervalSeconds"],
+                prefs=prefs,
+                usage=usage,
+            )
+            if not decision.get("node"):
+                continue
+            smart_group, parent_group = self._family_groups(payload, country)
+            applied = await self._apply_country_decision(
+                combo, country, decision, smart_group, parent_group, payload,
+            )
+            results.append({"country": country, "smartGroup": smart_group, **decision, **applied})
+        for item in results:
+            if not item.get("changed"):
+                continue
+            await asyncio.to_thread(
+                _record_gateway_event,
+                "info",
+                "rotation",
+                f"轮换「{combo['name']}」的 {item.get('country')} 出口",
+                f"{item.get('country')} → {item.get('node')}（{item.get('reason')}）"
+                + (f"，已重连 {item.get('closedConnections')} 条连接" if item.get("closedConnections") else ""),
+                {"comboId": combo_id, "country": item.get("country"), "node": item.get("node"), "reason": item.get("reason"), "closedConnections": item.get("closedConnections", 0), "closeFailures": item.get("closeFailures", 0)},
+                event_key=f"rotation:{combo_id}:{item.get('country')}:{int(time.time()) // 60}",
+            )
+        return {"ok": True, "strategy": "smart", "strategyLabel": "智能", "results": results}
+
+    async def rotate_due(self) -> list[dict[str, Any]]:
+        applied: list[dict[str, Any]] = []
+        with self._database() as connection:
+            rows = connection.execute("SELECT * FROM rotation_combos WHERE enabled = 1 AND gateway_enabled = 1").fetchall()
+        if not rows:
+            return applied
+        try:
+            payload = await mihomo.get("/proxies")
+        except httpx.HTTPError:
+            return applied
+        health = self._health(payload)
+        now = int(time.time())
+        for row in rows:
+            combo = self._public(row)
+            profiles, _ = self.pool_profiles(combo["id"])
+            countries_state = self._countries_state(combo)
+            prefs = combo.get("rotationPrefs") or None
+            usage = await asyncio.to_thread(self.monthly_provider_usage, combo["id"])
+            for country in sorted({profile["country"] for profile in profiles if profile.get("country")}):
+                country_pool = [profile for profile in profiles if profile["country"] == country]
+                entry = countries_state.get(country) or {}
+                current = {"country": country, "region": entry.get("region"), "node": entry.get("node")} if entry.get("node") else None
+                decision = choose_rotation(
+                    country_pool,
+                    current,
+                    health,
+                    rotate_due=now - int(entry.get("lastRotationAt") or 0) >= combo["rotateIntervalSeconds"],
+                    cross_due=now - int(entry.get("lastCrossAt") or 0) >= combo["crossRegionIntervalSeconds"],
+                    prefs=prefs,
+                    usage=usage,
+                )
+                if not decision.get("node"):
+                    continue
+                try:
+                    smart_group, parent_group = self._family_groups(payload, country)
+                    result = await self._apply_country_decision(
+                        combo, country, decision, smart_group, parent_group, payload,
+                    )
+                    if result["changed"]:
+                        applied.append({"id": combo["id"], "name": combo["name"], "country": country, "node": decision.get("node"), "reason": decision.get("reason"), "closedConnections": result.get("closedConnections", 0), "closeFailures": result.get("closeFailures", 0)})
+                except httpx.HTTPError:
+                    self._record_error(combo["id"], "轮换组暂时不可用")
+        return applied
+
+
+combos = ComboStore(_db)
+
+
+
+
 async def _handle_traffic_anomaly(
     action_id: int,
     connection: dict[str, Any],
@@ -2097,9 +3089,31 @@ def _clean_name(name: str) -> str:
     return cleaned or name
 
 
+def _provider_from_chain(raw_chain: str, providers: set[str]) -> str:
+    """从 flow 滚存的 chain JSON 解析出站节点所属 provider（末项为出口节点名）。
+
+    去掉国旗 emoji 前缀后，按已知提供商标签（订阅名）做最长前缀匹配，兼容
+    改名前后两种命名（“<Provider> <Country>-<City>” 与 “<Provider>-<原名>”）。
+    """
+    if not raw_chain:
+        return ""
+    try:
+        parsed = json.loads(raw_chain)
+        chain = [str(item) for item in parsed] if isinstance(parsed, list) else [raw_chain]
+    except (json.JSONDecodeError, TypeError):
+        chain = [raw_chain]
+    if not chain:
+        return ""
+    cleaned = re.sub(r"^\s*[\U0001F1E6-\U0001F1FF]{2}\s*", "", chain[-1])
+    for provider in sorted(providers, key=len, reverse=True):
+        if cleaned.startswith(provider):
+            return provider
+    return ""
+
+
 REGION_FLAGS = (
     (("香港", "Hong Kong", "HKG"), "🇭🇰"),
-    (("台湾", "Taiwan", "TPE"), "🇹🇼"),
+    (("台湾", "Taiwan", "TPE"), "🇨🇳"),
     (("新加坡", "狮城", "Singapore", "SGP"), "🇸🇬"),
     (("日本", "Japan", "Tokyo", "Osaka", "NRT", "KIX"), "🇯🇵"),
     (("美国", "United States", "USA", "Los Angeles", "San Jose", "LAX", "SJC"), "🇺🇸"),
@@ -2213,6 +3227,9 @@ class TrafficCollector:
         self._flow_pending: dict[tuple[str, str, str], dict[str, int]] = {}
         self._anomaly_window = TargetTrafficWindow()
         self._anomaly_tasks: set[asyncio.Task[Any]] = set()
+        self._last_version_fetch = 0.0
+        self._dashboard_cache: dict[tuple[str, tuple[str, ...] | None], tuple[float, dict[str, Any]]] = {}
+        self._dashboard_cache_lock = threading.Lock()
 
     def initialize(self) -> None:
         """Restore rate cursors and a useful chart window before polling resumes."""
@@ -2295,7 +3312,15 @@ class TrafficCollector:
 
     async def sample(self) -> None:
         was_online = self.online
-        payload, version = await asyncio.gather(mihomo.get("/connections"), mihomo.get("/version"))
+        # The version is effectively static between core restarts.  Reading it
+        # alongside every one-second connection sample doubles controller
+        # traffic and makes a slow /version response stall the live collector.
+        if self.version == "unknown" or time.monotonic() - self._last_version_fetch >= 60:
+            payload, version = await asyncio.gather(mihomo.get("/connections"), mihomo.get("/version"))
+            self.version = version.get("version", "unknown")
+            self._last_version_fetch = time.monotonic()
+        else:
+            payload = await mihomo.get("/connections")
         sampled_at = time.monotonic()
         sampled_wall = time.time()
         wall_time = int(sampled_wall)
@@ -2437,7 +3462,6 @@ class TrafficCollector:
             for name, value in sorted(chain_rollup.items(), key=lambda item: item[1], reverse=True)[:5]
         ]
         self.timeline.append({"time": _display_datetime().strftime("%H:%M:%S"), "up": self.up_rate, "down": self.down_rate})
-        self.version = version.get("version", "unknown")
         self.online = True
         self.error = None
         if not was_online:
@@ -2473,6 +3497,11 @@ class TrafficCollector:
             self._pending_interval = 0.0
             self._detail_pending = {}
             self._flow_pending = {}
+            # Persisted aggregates changed.  The next dashboard request should
+            # rebuild the historical snapshot once; concurrent clients then
+            # share that result while live rates/connections stay uncached.
+            with self._dashboard_cache_lock:
+                self._dashboard_cache.clear()
 
         anomaly_settings = await asyncio.to_thread(traffic_anomalies.get_settings)
         if anomaly_settings["enabled"]:
@@ -2721,40 +3750,63 @@ class TrafficCollector:
             return " AND ".join(conditions), parameters
 
         now = int(time.time())
-        month_start = _calendar_start("month", now)
-        previous_month_start = _calendar_start("month", month_start - 1)
-        today_start = _calendar_start("day", now)
-        yesterday_start = _calendar_start("day", today_start - 1)
-        month_where, month_params = rollup_where(month_start)
-        previous_month_where, previous_month_params = rollup_where(previous_month_start, month_start)
-        today_where, today_params = rollup_where(today_start)
-        yesterday_where, yesterday_params = rollup_where(yesterday_start, today_start)
         timeline_start, _, bucket_seconds, time_format = _range_window(timeline_range, now)
-        timeline_where, timeline_params = scoped_where(timeline_start)
-        with _db() as connection:
-            current_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {month_where}", month_params).fetchone()["total"]
-            previous_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {previous_month_where}", previous_month_params).fetchone()["total"]
-            today_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {today_where}", today_params).fetchone()["total"]
-            yesterday_total = connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {yesterday_where}", yesterday_params).fetchone()["total"]
-            device_rows = connection.execute(
-                f"SELECT device,SUM(up_bytes + down_bytes) total FROM traffic_daily_rollups WHERE {month_where} AND device != 'unknown' GROUP BY device ORDER BY total DESC",
-                month_params,
-            ).fetchall()
-            exit_rows = connection.execute(
-                f"SELECT chain,SUM(up_bytes + down_bytes) total FROM traffic_flow_daily_rollups WHERE {month_where} GROUP BY chain ORDER BY total DESC",
-                month_params,
-            ).fetchall()
-            if timeline_range == "month":
-                month_timeline_where, month_timeline_params = rollup_where(timeline_start)
-                timeline_rows = connection.execute(
-                    f"SELECT day_start bucket,SUM(up_bytes) up,SUM(down_bytes) down FROM traffic_daily_rollups WHERE {month_timeline_where} GROUP BY day_start ORDER BY day_start",
-                    month_timeline_params,
-                ).fetchall()
-            else:
-                timeline_rows = connection.execute(
-                    f"SELECT (ts / ?) * ? bucket,SUM(up_bytes) up,SUM(down_bytes) down FROM traffic_samples WHERE {timeline_where} GROUP BY bucket ORDER BY bucket",
-                    [bucket_seconds, bucket_seconds, *timeline_params],
-                ).fetchall()
+        scope_key = None if allowed is None else tuple(sorted(allowed))
+        cache_key = (timeline_range, scope_key)
+        cached: dict[str, Any] | None = None
+        with self._dashboard_cache_lock:
+            cached_entry = self._dashboard_cache.get(cache_key)
+            if cached_entry and time.monotonic() - cached_entry[0] < 30:
+                cached = cached_entry[1]
+            if cached is None:
+                month_start = _calendar_start("month", now)
+                previous_month_start = _calendar_start("month", month_start - 1)
+                today_start = _calendar_start("day", now)
+                yesterday_start = _calendar_start("day", today_start - 1)
+                month_where, month_params = rollup_where(month_start)
+                previous_month_where, previous_month_params = rollup_where(previous_month_start, month_start)
+                today_where, today_params = rollup_where(today_start)
+                yesterday_where, yesterday_params = rollup_where(yesterday_start, today_start)
+                timeline_where, timeline_params = scoped_where(timeline_start)
+                with _db() as connection:
+                    cached = {
+                        "current_total": connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {month_where}", month_params).fetchone()["total"],
+                        "previous_total": connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {previous_month_where}", previous_month_params).fetchone()["total"],
+                        "today_total": connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {today_where}", today_params).fetchone()["total"],
+                        "yesterday_total": connection.execute(f"SELECT COALESCE(SUM(up_bytes + down_bytes), 0) total FROM traffic_daily_rollups WHERE {yesterday_where}", yesterday_params).fetchone()["total"],
+                        "device_rows": [dict(row) for row in connection.execute(
+                            f"SELECT device,SUM(up_bytes + down_bytes) total FROM traffic_daily_rollups WHERE {month_where} AND device != 'unknown' GROUP BY device ORDER BY total DESC",
+                            month_params,
+                        ).fetchall()],
+                        "exit_rows": [dict(row) for row in connection.execute(
+                            f"SELECT chain,SUM(up_bytes + down_bytes) total FROM traffic_flow_daily_rollups WHERE {month_where} GROUP BY chain ORDER BY total DESC",
+                            month_params,
+                        ).fetchall()],
+                    }
+                    if timeline_range == "month":
+                        month_timeline_where, month_timeline_params = rollup_where(timeline_start)
+                        rows = connection.execute(
+                            f"SELECT day_start bucket,SUM(up_bytes) up,SUM(down_bytes) down FROM traffic_daily_rollups WHERE {month_timeline_where} GROUP BY day_start ORDER BY day_start",
+                            month_timeline_params,
+                        ).fetchall()
+                    else:
+                        rows = connection.execute(
+                            f"SELECT (ts / ?) * ? bucket,SUM(up_bytes) up,SUM(down_bytes) down FROM traffic_samples WHERE {timeline_where} GROUP BY bucket ORDER BY bucket",
+                            [bucket_seconds, bucket_seconds, *timeline_params],
+                        ).fetchall()
+                    cached["timeline_rows"] = [dict(row) for row in rows]
+                if len(self._dashboard_cache) >= 64:
+                    oldest = min(self._dashboard_cache, key=lambda item: self._dashboard_cache[item][0])
+                    self._dashboard_cache.pop(oldest, None)
+                self._dashboard_cache[cache_key] = (time.monotonic(), cached)
+
+        current_total = int(cached["current_total"])
+        previous_total = int(cached["previous_total"])
+        today_total = int(cached["today_total"])
+        yesterday_total = int(cached["yesterday_total"])
+        device_rows = cached["device_rows"]
+        exit_rows = cached["exit_rows"]
+        timeline_rows = cached["timeline_rows"]
 
         aliases = _aliases()
         devices_by_ip = {row["ip"]: dict(row) for row in self.visible_devices(user)}
@@ -2766,8 +3818,7 @@ class TrafficCollector:
             device["total"] = int(row["total"] or 0)
         devices = sorted(devices_by_ip.values(), key=lambda item: (item.get("total", 0), item.get("up", 0) + item.get("down", 0)), reverse=True)
 
-        group_names = {_clean_name(name) for name in _config_group_order()}
-        chains = _exclusive_exit_usage(exit_rows, int(current_total), group_names)
+        chains = _exclusive_exit_usage(exit_rows, int(current_total))
         timeline = _traffic_timeline(timeline_rows, time_format)
         timeline_summary = _traffic_summary(timeline_rows)
         month_change = round((int(current_total) / int(previous_total) - 1) * 100, 1) if previous_total else 0
@@ -3094,6 +4145,8 @@ async def strategy_payload() -> dict[str, Any]:
             "LoadBalance": "自动均衡",
             "Fallback": "故障转移",
         }.get(group_type, group_type or "自动策略")
+        if group_type == "Selector" and name.endswith("智能"):
+            mode_label = "智能轮换"
         now = str(group.get("now") or "自动均衡")
         members = [member_record(str(item), now) for item in group.get("all", [])]
         delay_values = display_delays(name)
@@ -3205,6 +4258,111 @@ async def _subscription_refresh_loop() -> None:
                 logger.exception("scheduled subscription refresh failed", extra={"subscription_id": subscription_id})
 
 
+def _active_subscription_ids() -> set[str]:
+    """当前在 mihomo 中生效的订阅 id 集合（网关组合的订阅，或单订阅网关源）。"""
+    combo = combos.gateway_combo()
+    if combo is not None:
+        return {str(item) for item in (combo.get("subscriptionIds") or [])}
+    with _db() as connection:
+        row = connection.execute("SELECT id FROM subscriptions WHERE gateway_enabled = 1 LIMIT 1").fetchone()
+    return {str(row["id"])} if row else set()
+
+
+async def _subscription_health_monitor() -> None:
+    """监测订阅节点批量失效：某订阅节点连续两轮全部失效时，记一条告警（上游可能已更新）。"""
+    dead_streak: dict[str, int] = {}
+    while True:
+        await asyncio.sleep(120)
+        active_ids = await asyncio.to_thread(_active_subscription_ids)
+        if not active_ids:
+            continue
+        try:
+            payload = await mihomo.get("/proxies")
+        except httpx.HTTPError:
+            continue
+        proxies = payload.get("proxies") or {}
+        with _db() as connection:
+            rows = connection.execute("SELECT id, name, node_count FROM subscriptions WHERE node_count > 0").fetchall()
+        if not rows:
+            continue
+        # provider 标签（重名订阅追加短 id，与组合内 provider 标签一致），用于最长前缀匹配。
+        counts: dict[str, int] = {}
+        for row in rows:
+            counts[str(row["name"])] = counts.get(str(row["name"]), 0) + 1
+        labels = {
+            str(row["id"]): (str(row["name"]) if counts[str(row["name"])] == 1 else f"{row['name']}·{str(row['id'])[:6]}")
+            for row in rows
+        }
+        alive_by_sub: dict[str, int] = {str(row["id"]): 0 for row in rows}
+        for proxy_name, data in proxies.items():
+            if not isinstance(data, dict) or isinstance(data.get("all"), list):
+                continue  # 跳过策略组，只看叶子节点
+            if data.get("alive") is False:
+                continue
+            cleaned = re.sub(r"^\s*[\U0001F1E6-\U0001F1FF]{2}\s*", "", str(proxy_name))
+            best_sub: str | None = None
+            best_len = 0
+            for sub_id, label in labels.items():
+                if cleaned.startswith(label) and len(label) > best_len:
+                    best_len = len(label)
+                    best_sub = sub_id
+            if best_sub is not None:
+                alive_by_sub[best_sub] += 1
+        for row in rows:
+            sub_id = str(row["id"])
+            if sub_id not in active_ids:
+                continue
+            total = int(row["node_count"])
+            alive = alive_by_sub.get(sub_id, 0)
+            if alive == 0 and total > 0:
+                dead_streak[sub_id] = dead_streak.get(sub_id, 0) + 1
+                if dead_streak[sub_id] >= 2:
+                    await asyncio.to_thread(
+                        _record_gateway_event,
+                        "warning",
+                        "subscription",
+                        "订阅节点疑似批量失效",
+                        f"订阅「{row['name']}」的 {total} 个节点连续两轮全部失效，上游可能已更新配置，请重新获取订阅链接。",
+                        {"subscriptionId": sub_id, "nodeCount": total},
+                        event_key=f"sub:{sub_id}:all-dead:{int(time.time()) // 3600}",
+                    )
+            else:
+                dead_streak[sub_id] = 0
+
+
+async def _combo_rotation_loop() -> None:
+    last_probe = 0
+    while True:
+        await asyncio.sleep(30)
+        now = int(time.time())
+        try:
+            applied = await combos.rotate_due()
+            if applied:
+                logger.info("combo rotation applied", extra={"rotations": len(applied)})
+                for item in applied:
+                    await asyncio.to_thread(
+                        _record_gateway_event,
+                        "info",
+                        "rotation",
+                        f"轮换「{item['name']}」的 {item['country']} 出口",
+                        f"{item['country']} → {item['node']}（{item['reason']}）"
+                        + (f"，已重连 {item.get('closedConnections')} 条连接" if item.get("closedConnections") else ""),
+                        {"comboId": item["id"], "country": item["country"], "node": item["node"], "reason": item["reason"], "closedConnections": item.get("closedConnections", 0), "closeFailures": item.get("closeFailures", 0)},
+                        event_key=f"rotation:{item['id']}:{item['country']}:{int(time.time()) // 60}",
+                    )
+        except Exception:
+            logger.exception("combo rotation cycle failed")
+        # 每 6 小时对网关组合的未识别/过期地区做一次出口探测，自动补全二级地区。
+        if now - last_probe >= 6 * 3600:
+            last_probe = now
+            try:
+                for combo in combos.list({"id": 0, "role": "admin"}):
+                    if combo["gatewayEnabled"]:
+                        await combos.probe_pool(combo["id"])
+            except Exception:
+                logger.exception("combo region probe failed")
+
+
 def _mihomo_log_event(level: str, message: str) -> tuple[str, str] | None:
     lowered = message.casefold()
     meaningful = (
@@ -3264,6 +4422,22 @@ async def _mihomo_event_loop() -> None:
             await asyncio.sleep(5)
 
 
+async def _ensure_default_mmdb() -> None:
+    """启动时若离线地区库缺失，从默认源（jsDelivr 的 GeoLite2-City）后台下载，不阻塞启动。"""
+    path = Path(_mmdb_managed_path)
+    if path.exists() and path.stat().st_size > 0:
+        return
+    try:
+        info = await asyncio.to_thread(install_mmdb_from_url, settings.geoip_mmdb_url, _mmdb_managed_path)
+        geoip_resolver.reload()
+        await asyncio.to_thread(
+            _record_gateway_event, "info", "system", "GeoIP 地区库已自动下载",
+            "启动时检测到离线库缺失，已从默认源安装。", {"size": info.get("size", 0)},
+        )
+    except Exception as exc:
+        logger.warning("默认 GeoIP 库下载失败，回退在线解析：%s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if not settings.controller_secret and not settings.allow_insecure_controller:
@@ -3274,7 +4448,10 @@ async def lifespan(_: FastAPI):
     task = asyncio.create_task(collector.run())
     restore_task = asyncio.create_task(rule_workspace.restore_if_applied())
     subscription_task = asyncio.create_task(_subscription_refresh_loop())
+    combo_task = asyncio.create_task(_combo_rotation_loop())
     event_task = asyncio.create_task(_mihomo_event_loop())
+    mmdb_task = asyncio.create_task(_ensure_default_mmdb())
+    subscription_health_task = asyncio.create_task(_subscription_health_monitor())
     await asyncio.to_thread(_record_gateway_event, "info", "system", "Egresscope 已启动", "运行统计与事件采集已开始。", {"version": "0.2.0"})
     try:
         yield
@@ -3282,10 +4459,13 @@ async def lifespan(_: FastAPI):
         collector.stop()
         await task
         subscription_task.cancel()
+        combo_task.cancel()
         event_task.cancel()
+        mmdb_task.cancel()
+        subscription_health_task.cancel()
         if not restore_task.done():
             restore_task.cancel()
-        await asyncio.gather(restore_task, subscription_task, event_task, return_exceptions=True)
+        await asyncio.gather(restore_task, subscription_task, combo_task, event_task, mmdb_task, subscription_health_task, return_exceptions=True)
         await asyncio.to_thread(_record_gateway_event, "info", "system", "Egresscope 已停止", "事件采集已安全结束。")
         await mihomo.close()
 
@@ -3494,7 +4674,7 @@ async def create_subscription(request: SubscriptionRequest, user: dict[str, Any]
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
-        subscription_id = await asyncio.to_thread(subscriptions.create, user, request.name, url, request.interval, request.enabled)
+        subscription_id = await asyncio.to_thread(subscriptions.create, user, request.name, url, request.interval, request.enabled, request.urlRepeatable)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
@@ -3739,12 +4919,46 @@ async def surge_subscription_delivery(token: str, request: Request) -> PlainText
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@app.get("/sub/combo/{token}/clash.yaml", response_class=PlainTextResponse)
+@app.get("/sub/combo/{token}/mihomo.yaml", response_class=PlainTextResponse, include_in_schema=False)
+async def combo_clash_delivery(token: str) -> PlainTextResponse:
+    try:
+        payload = await asyncio.to_thread(combos.delivery, token, "clash")
+        return PlainTextResponse(
+            payload,
+            media_type="application/yaml",
+            headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="egresscope-combo.yaml"'},
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在、节点池为空或已停用") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/sub/combo/{token}/surge.conf", response_class=PlainTextResponse)
+async def combo_surge_delivery(token: str, request: Request) -> PlainTextResponse:
+    try:
+        payload = await asyncio.to_thread(combos.delivery, token, "surge", str(request.url))
+        return PlainTextResponse(
+            payload,
+            media_type="text/plain; charset=utf-8",
+            headers={"Cache-Control": "no-store", "Content-Disposition": 'inline; filename="egresscope-combo-surge.conf"'},
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在、节点池为空或已停用") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @app.get("/api/dashboard")
 async def dashboard(
     range: str = Query(default="live", pattern="^(live|1h|6h|24h|7d|14d|month)$"),
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
-    return collector.dashboard(user, range)
+    # Dashboard history aggregation is SQLite-heavy.  Keep it off the asyncio
+    # event loop so a slow range query cannot stall login, strategy switches,
+    # connection termination, or the one-second live refresh itself.
+    return await asyncio.to_thread(collector.dashboard, user, range)
 
 
 @app.get("/api/connections")
@@ -4679,6 +5893,16 @@ def _affected_connection_ids(payload: dict[str, Any], group_name: str) -> list[s
     ]
 
 
+def _affected_connection_ids_for_groups(payload: dict[str, Any], group_names: set[str]) -> list[str]:
+    """Return live connection ids whose recorded chain crosses any group."""
+    return [
+        str(connection["id"])
+        for connection in payload.get("connections", [])
+        if connection.get("id")
+        and group_names.intersection(str(item) for item in (connection.get("chains") or []))
+    ]
+
+
 @app.put("/api/strategies/{group_name}")
 async def select_strategy(group_name: str, request: StrategySelectRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
     if user["role"] != "admin":
@@ -4802,6 +6026,308 @@ async def github_sync_pull(_: dict[str, Any] = Depends(admin_user)) -> dict[str,
     except httpx.HTTPError as exc:
         await asyncio.to_thread(github_sync.record_error, "GitHub API 暂时无法访问")
         raise HTTPException(status_code=502, detail="GitHub API 暂时无法访问") from exc
+
+
+def _combo_view(combo_id: str) -> dict[str, Any]:
+    combo = combos.get(combo_id)
+    combo["pool"] = combos.pool_summary(combo_id)
+    return combo
+
+
+@app.get("/api/combos")
+async def combo_list(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    def build() -> list[dict[str, Any]]:
+        return [dict(item, pool=combos.pool_summary(item["id"])) for item in combos.list(user)]
+    return {"combos": await asyncio.to_thread(build)}
+
+
+@app.get("/api/combos/{combo_id}/nodes")
+async def combo_nodes(combo_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(combos.get_authorized, combo_id, user)
+        return {"nodes": await asyncio.to_thread(combos.nodes_detail, combo_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在或无权访问") from exc
+
+
+@app.post("/api/combos", status_code=201)
+async def create_combo(request: RotationComboRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    try:
+        combo = await asyncio.to_thread(combos.create, user, request.model_dump())
+        return {"combo": await asyncio.to_thread(_combo_view, combo["id"])}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.patch("/api/combos/{combo_id}")
+async def update_combo(combo_id: str, request: RotationComboUpdateRequest, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    try:
+        updates = request.model_dump(exclude_none=True)
+        if "subscriptionIds" in updates and not updates["subscriptionIds"]:
+            raise HTTPException(status_code=422, detail="组合至少需要一个订阅")
+        combo = await asyncio.to_thread(combos.update, combo_id, user, updates)
+        if combo["gatewayEnabled"]:
+            await rule_workspace.apply()
+        return {"combo": await asyncio.to_thread(_combo_view, combo_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在或无权访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/api/combos/{combo_id}")
+async def delete_combo(combo_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, bool]:
+    try:
+        was_gateway = await asyncio.to_thread(combos.delete, combo_id, user)
+        if was_gateway:
+            await rule_workspace.apply()
+        return {"ok": True}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在或无权访问") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="组合已删除，但网关恢复基础节点配置失败") from exc
+
+
+@app.post("/api/combos/{combo_id}/rotate-token")
+async def rotate_combo_delivery_token(combo_id: str, user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    try:
+        combo = await asyncio.to_thread(combos.rotate_delivery_token, combo_id, user)
+        return {"combo": await asyncio.to_thread(_combo_view, combo_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在或无权访问") from exc
+
+
+@app.post("/api/combos/{combo_id}/activate")
+async def activate_combo(combo_id: str, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(combos.activate, combo_id)
+        await rule_workspace.apply()
+        asyncio.create_task(combos.probe_pool(combo_id))
+        return {"combo": _combo_view(combo_id)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/combos/{combo_id}/probe-regions")
+async def probe_combo_regions(
+    combo_id: str,
+    force: bool = Query(default=False),
+    _: dict[str, Any] = Depends(admin_user),
+) -> dict[str, Any]:
+    try:
+        result = await combos.probe_pool(combo_id, force=force)
+        return {"ok": True, **result}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/combos/{combo_id}/deactivate")
+async def deactivate_combo(combo_id: str, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(combos.deactivate, combo_id)
+        await rule_workspace.apply()
+        return {"ok": True}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="组合已停用，但网关恢复基础节点配置失败") from exc
+
+
+@app.post("/api/combos/{combo_id}/rotate")
+async def rotate_combo_now(combo_id: str, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        result = await combos.rotate_combo(combo_id, force_cross=False)
+        result["combo"] = await asyncio.to_thread(_combo_view, combo_id)
+        return result
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/combos/{combo_id}/cross-region")
+async def cross_region_combo(combo_id: str, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        result = await combos.rotate_combo(combo_id, force_cross=True)
+        result["combo"] = await asyncio.to_thread(_combo_view, combo_id)
+        return result
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="组合不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/node-regions")
+async def node_region_list(subscriptionId: str | None = None, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    return {"regions": await asyncio.to_thread(node_regions_store.list, subscriptionId)}
+
+
+@app.post("/api/node-regions/seed")
+async def seed_node_regions(request: NodeRegionSeedRequest, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    # 为这些订阅的节点做名称启发式预填。
+    try:
+        seeded = 0
+        with _db() as connection:
+            for subscription_id in request.subscriptionIds:
+                rows = connection.execute(
+                    "SELECT payload_json FROM subscriptions WHERE id = ?", (subscription_id,)
+                ).fetchall()
+                for row in rows:
+                    for node in json.loads(row["payload_json"] or "[]"):
+                        name = str(node.get("name") or "")
+                        if not name:
+                            continue
+                        key = node_regions_store.node_key(subscription_id, name)
+                        existing = connection.execute("SELECT region FROM node_regions WHERE node_key = ?", (key,)).fetchone()
+                        if existing and existing["region"]:
+                            continue
+                        connection.execute(
+                            "INSERT OR IGNORE INTO node_regions(node_key,subscription_id,node_name,country,region,source,probed_ip,updated_at) VALUES(?,?,?,?,?,'name','',?)",
+                            (key, subscription_id, name, _subscription_region(name) or "", city_of(name) or "默认", int(time.time())),
+                        )
+                        seeded += 1
+        return {"ok": True, "seeded": seeded}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/api/node-regions/{node_key:path}")
+async def assign_node_region(node_key: str, request: NodeRegionRequest, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(node_regions_store.assign_manual, node_key, request.country, request.region)
+        return {"ok": True}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/geoip/mmdb")
+async def geoip_mmdb_status(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    status = await asyncio.to_thread(geoip_resolver.mmdb_status)
+    status["downloadUrl"] = settings.geoip_mmdb_url
+    return status
+
+
+@app.post("/api/geoip/mmdb/download")
+async def geoip_mmdb_download(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    """从默认源（jsDelivr 托管的 GeoLite2-City）下载并安装离线地区库。"""
+    try:
+        info = await asyncio.to_thread(install_mmdb_from_url, settings.geoip_mmdb_url, _mmdb_managed_path)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="下载离线 GeoIP 库失败，请检查面板容器能否访问 jsDelivr") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    geoip_resolver.reload()
+    await asyncio.to_thread(_record_gateway_event, "info", "system", "GeoIP 地区库已下载", f"离线库已安装：{Path(_mmdb_managed_path).name}", {"size": info.get("size", 0)})
+    status = await asyncio.to_thread(geoip_resolver.mmdb_status)
+    status["downloadUrl"] = settings.geoip_mmdb_url
+    return status
+
+
+@app.post("/api/geoip/mmdb", status_code=201)
+async def geoip_mmdb_upload(request: Request, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    content_type = request.headers.get("content-type") or ""
+    if "octet-stream" not in content_type:
+        raise HTTPException(status_code=415, detail="请以 application/octet-stream 上传 .mmdb 文件")
+    content = await request.body()
+    if len(content) > 200 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="GeoIP 库文件不能超过 200 MiB")
+    if not content:
+        raise HTTPException(status_code=422, detail="上传内容为空")
+    path = Path(_mmdb_managed_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".mmdb.tmp")
+    temporary.write_bytes(content)
+    # 先验证新库能被解析，再原子替换；未安装 maxminddb 时跳过校验（容器内有该依赖）。
+    try:
+        import maxminddb
+    except ImportError:
+        maxminddb = None
+    if maxminddb is not None:
+        try:
+            probe = maxminddb.open_database(str(temporary))
+            probe.close()
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            raise HTTPException(status_code=422, detail="文件不是有效的 MaxMind GeoIP 数据库") from exc
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+    geoip_resolver.reload()
+    await asyncio.to_thread(_record_gateway_event, "info", "system", "GeoIP 地区库已更新", f"离线库已替换：{path.name}", {"size": len(content)})
+    return await asyncio.to_thread(geoip_resolver.mmdb_status)
+
+
+@app.delete("/api/geoip/mmdb")
+async def geoip_mmdb_delete(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    path = Path(_mmdb_managed_path)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    geoip_resolver.reload()
+    return await asyncio.to_thread(geoip_resolver.mmdb_status)
+
+
+@app.get("/api/kernel")
+async def kernel_status(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    return await asyncio.to_thread(kernel_manager.status, collector.version if collector.online else None)
+
+
+@app.post("/api/kernel/check")
+async def kernel_check(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        latest = await kernel_manager.fetch_latest()
+        latest["status"] = await asyncio.to_thread(kernel_manager.status, collector.version if collector.online else None)
+        return latest
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="GitHub 发布信息暂时无法访问") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/kernel/download")
+async def kernel_download(request: KernelDownloadRequest, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        latest = await kernel_manager.fetch_latest()
+        result = await kernel_manager.download_and_stage(request.version, latest=latest, confirm_unverified=request.confirmUnverified)
+        result["status"] = await asyncio.to_thread(kernel_manager.status, collector.version if collector.online else None)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="内核下载失败，请稍后重试") from exc
+
+
+@app.post("/api/kernel/apply")
+async def kernel_apply(request: KernelDownloadRequest, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(kernel_manager.apply, request.version)
+        result["status"] = await asyncio.to_thread(kernel_manager.status, collector.version if collector.online else None)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/kernel/rollback")
+async def kernel_rollback(_: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(kernel_manager.rollback)
+        result["status"] = await asyncio.to_thread(kernel_manager.status, collector.version if collector.online else None)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/api/kernel/delete")
+async def kernel_delete(request: KernelDownloadRequest, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    try:
+        await asyncio.to_thread(kernel_manager.delete, request.version)
+        return {"ok": True, "status": await asyncio.to_thread(kernel_manager.status, collector.version if collector.online else None)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/rules/workspace")

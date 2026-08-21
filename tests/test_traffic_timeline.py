@@ -55,17 +55,36 @@ class TrafficTimelineTests(unittest.TestCase):
         ))
         self.assertEqual(sum(node["name"] == "国外媒体" for node in flow["nodes"]), 2)
 
-    def test_exit_usage_counts_only_the_deepest_policy(self):
+    def test_exit_usage_attributes_to_region_not_policy_or_node(self):
         rows = [
-            {"chain": '["节点选择","美国","美国最佳","美国节点 01"]', "total": 700},
-            {"chain": '["节点选择","美国","美国智能","美国节点 02"]', "total": 200},
+            {"chain": '["节点选择","美国","美国最佳","美国圣何塞 01"]', "total": 700},
+            {"chain": '["节点选择","美国","美国智能","美国圣何塞 02"]', "total": 200},
+            {"chain": '["节点选择","美国","美国最佳","美国洛杉矶 03"]', "total": 50},
             {"chain": '["全球直连","DIRECT"]', "total": 100},
         ]
-        result = _exclusive_exit_usage(rows, 1200, {"节点选择", "美国", "美国最佳", "美国智能", "全球直连"})
+        result = _exclusive_exit_usage(rows, 1200)
         values = {item["name"]: item["value"] for item in result}
-        self.assertEqual(values, {"美国最佳": 700, "美国智能": 200, "DIRECT": 100, "历史未细分": 200})
+        # 同一地区的不同节点/策略组合并；不同地区分开。
+        self.assertEqual(values, {"美国-圣何塞": 900, "美国-洛杉矶": 50, "DIRECT": 100, "历史未细分": 150})
         self.assertNotIn("节点选择", values)
+        self.assertNotIn("美国最佳", values)
+        self.assertNotIn("美国智能", values)
+        self.assertNotIn("美国圣何塞 01", values)
         self.assertEqual(sum(values.values()), 1200)
+
+    def test_exit_usage_aggregates_probe_chain_into_single_bucket(self):
+        rows = [
+            {"chain": '["🔍 出口探测","香港节点 01"]', "total": 5},
+            {"chain": '["🔍 出口探测","美国节点 02"]', "total": 7},
+            {"chain": '["🔍 出口探测","德国节点 03"]', "total": 9},
+            {"chain": '["节点选择","美国","美国最佳","美国圣何塞 01"]', "total": 700},
+        ]
+        result = _exclusive_exit_usage(rows, 721)
+        values = {item["name"]: item["value"] for item in result}
+        self.assertEqual(values, {"美国-圣何塞": 700, "出口探测": 21})
+        self.assertNotIn("香港节点 01", values)
+        self.assertNotIn("美国节点 02", values)
+        self.assertNotIn("德国节点 03", values)
 
 
     def test_display_names_preserve_provider_emoji_and_infer_flags_for_plain_names(self):

@@ -85,6 +85,44 @@ export const api = {
   saveGithubSync: (payload) => request("/api/github-sync", { method: "PUT", body: JSON.stringify(payload) }),
   githubSyncPush: () => request("/api/github-sync/push", { method: "POST" }),
   githubSyncPull: () => request("/api/github-sync/pull", { method: "POST" }),
+  combos: () => request("/api/combos"),
+  comboNodes: (id) => request(`/api/combos/${encodeURIComponent(id)}/nodes`),
+  createCombo: (payload) => request("/api/combos", { method: "POST", body: JSON.stringify(payload) }),
+  updateCombo: (id, payload) => request(`/api/combos/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteCombo: (id) => request(`/api/combos/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  activateCombo: (id) => request(`/api/combos/${encodeURIComponent(id)}/activate`, { method: "POST" }),
+  deactivateCombo: (id) => request(`/api/combos/${encodeURIComponent(id)}/deactivate`, { method: "POST" }),
+  rotateCombo: (id) => request(`/api/combos/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
+  crossRegionCombo: (id) => request(`/api/combos/${encodeURIComponent(id)}/cross-region`, { method: "POST" }),
+  rotateComboToken: (id) => request(`/api/combos/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
+  probeComboRegions: (id, force = false) => request(`/api/combos/${encodeURIComponent(id)}/probe-regions?force=${force}`, { method: "POST", timeoutMs: 300_000, timeoutMessage: "出口地区探测超时，请稍后重试" }),
+  nodeRegions: () => request("/api/node-regions"),
+  assignNodeRegion: (key, country, region) => request(`/api/node-regions/${encodeURIComponent(key)}`, { method: "PUT", body: JSON.stringify({ country, region }) }),
+  kernelStatus: () => request("/api/kernel"),
+  kernelCheck: () => request("/api/kernel/check", { method: "POST" }),
+  kernelDownload: (version, confirmUnverified = false) => request("/api/kernel/download", { method: "POST", body: JSON.stringify({ version, confirmUnverified }) }),
+  kernelApply: (version) => request("/api/kernel/apply", { method: "POST", body: JSON.stringify({ version }) }),
+  kernelRollback: () => request("/api/kernel/rollback", { method: "POST" }),
+  kernelDelete: (version) => request("/api/kernel/delete", { method: "POST", body: JSON.stringify({ version }) }),
+  geoipMmdb: () => request("/api/geoip/mmdb"),
+  geoipMmdbUpload: async (file) => {
+    const response = await fetch("/api/geoip/mmdb", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const error = new Error(body.detail || `上传失败（${response.status}）`);
+      error.status = response.status;
+      if (response.status === 401) window.dispatchEvent(new CustomEvent("egresscope:unauthorized"));
+      throw error;
+    }
+    return response.json();
+  },
+  geoipMmdbDelete: () => request("/api/geoip/mmdb", { method: "DELETE" }),
+  geoipMmdbDownload: () => request("/api/geoip/mmdb/download", { method: "POST" }),
   ruleWorkspace: () => request("/api/rules/workspace"),
   resetRules: () => request("/api/rules/reset", { method: "POST" }),
   applyRules: () => request("/api/rules/apply", { method: "POST" }),
@@ -134,8 +172,8 @@ export const subscribeLive = (onData, onError = () => {}) => {
   let timer;
   const poll = async () => {
     try { const payload = await api.dashboard(); if (!stopped) onData(payload); } catch (error) { if (!stopped) onError(error); }
-    if (!stopped) timer = setTimeout(poll, 3000);
+    if (!stopped) timer = setTimeout(poll, 1000);
   };
-  timer = setTimeout(poll, 3000);
+  timer = setTimeout(poll, 1000);
   return () => { stopped = true; clearTimeout(timer); };
 };
