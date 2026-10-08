@@ -2,6 +2,13 @@
 
 All notable changes to Egresscope are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Allow gateway subscriptions that do not cover every configured country. Preserve rules and policy topology; empty regional node groups retain explicit fallbacks or use `REJECT` instead of preventing activation.
+- Report reject-only regional strategies as unavailable, with an explicit unavailable-node label.
+
 ## [0.4.1] - 2026-08-21
 
 ### Fixed
