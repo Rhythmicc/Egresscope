@@ -573,6 +573,8 @@ def _sanitized_subscription_error(exc: Exception, source_url: str) -> str:
 
 
 def _overlay_subscription_nodes(config: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    if not nodes:
+        raise ValueError("订阅没有可用节点，请先刷新或调整节点过滤")
     old_nodes = [item for item in (config.get("proxies") or []) if isinstance(item, dict) and item.get("name")]
     old_names = {str(item["name"]) for item in old_nodes}
     new_names = [str(item["name"]) for item in nodes]
@@ -596,7 +598,11 @@ def _overlay_subscription_nodes(config: dict[str, Any], nodes: list[dict[str, An
             region = next(iter(member_regions)) if len(member_regions) == 1 else None
         candidates = [name for name in new_names if region is None or _subscription_region(name) == region]
         if not candidates:
-            raise ValueError(f"订阅没有可用于策略组 {str(group.get('name') or '').strip()} 的节点")
+            # Keep regional policy references valid when a provider does not
+            # cover that country. REJECT makes the missing exit unavailable;
+            # it must never silently route through another country or DIRECT.
+            group["proxies"] = preserved or ["REJECT"]
+            continue
         group["proxies"] = list(dict.fromkeys([*preserved, *candidates]))
     return config
 
@@ -4077,6 +4083,18 @@ def _config_group_order() -> list[str]:
 REGIONS = ("美国", "香港", "日本", "台湾", "新加坡", "狮城", "英国")
 
 
+def _proxy_available(proxy_map: dict[str, Any], name: str, visited: frozenset[str] = frozenset()) -> bool:
+    if name in visited or name in {"REJECT", "REJECT-DROP"}:
+        return False
+    proxy = proxy_map.get(name) or {}
+    if proxy.get("type") in {"Reject", "RejectDrop"} or proxy.get("alive") is False:
+        return False
+    members = proxy.get("all")
+    if isinstance(members, list):
+        return any(_proxy_available(proxy_map, str(member), visited | {name}) for member in members)
+    return bool(proxy) or name == "DIRECT"
+
+
 async def strategy_payload() -> dict[str, Any]:
     payload = await mihomo.get("/proxies")
     proxy_map = payload.get("proxies") or {}
@@ -4127,15 +4145,15 @@ async def strategy_payload() -> dict[str, Any]:
 
     def member_record(member_name: str, selected: str) -> dict[str, Any]:
         proxy = proxy_map.get(member_name) or {}
-        alive = proxy.get("alive") is not False
+        alive = _proxy_available(proxy_map, member_name)
         delay = latest_delay(member_name)
         return {
             "id": member_name,
-            "name": _display_node_name(member_name),
+            "name": "无可用节点（REJECT）" if member_name == "REJECT" else _display_node_name(member_name),
             "alive": alive,
             "selected": member_name == selected,
             "delayMs": delay,
-            "delay": f"{delay} ms" if delay else "待测速",
+            "delay": "不可用" if not alive else f"{delay} ms" if delay else "待测速",
             "delayLevel": delay_level(delay, alive),
         }
 
