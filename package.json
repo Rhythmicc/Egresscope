@@ -9,7 +9,8 @@
     "build": "vite build && node scripts/prepare-sites-build.mjs",
     "preview": "vite preview",
     "test:sites": "node --test tests/sites-worker.test.mjs",
-    "test": "npm run test:sites && python3 -m unittest discover -s tests -v"
+    "test": "npm run test:proxy && npm run test:sites && python3 -m unittest discover -s tests -v",
+    "test:proxy": "node --test tests/proxy-env.test.mjs"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

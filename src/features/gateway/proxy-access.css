@@ -2,6 +2,9 @@
 .proxy-access-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
 .proxy-access-head h2 { margin: 0; font-size: 18px; }
 .proxy-access-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.proxy-config-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.proxy-copy-account { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; color: var(--muted); font-size: 13px; }
+.proxy-copy-account select { min-height: 36px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); }
 .proxy-access .filter-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; min-height: 36px; }
 .proxy-access button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 .proxy-access .filter-button:disabled { cursor: wait; opacity: .6; }
@@ -30,6 +33,8 @@
 .gateway-tabs .proxy-tab { white-space: nowrap; }
 @media (max-width: 700px) {
   .proxy-access { padding: 16px; }
+  .proxy-access-head { flex-wrap: wrap; }
+  .proxy-config-actions { width: 100%; }
   .proxy-field { grid-template-columns: 60px minmax(0, 1fr); gap: 8px; padding: 12px; }
   .proxy-field > button, .proxy-field-actions { grid-column: 2; justify-self: start; flex-wrap: wrap; }
   .proxy-access .filter-button { min-height: 44px; }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowClockwise, Copy, Eye, EyeSlash } from "@phosphor-icons/react";
 import { api } from "../../api";
+import { proxyEnvironment } from "./proxy-env";
 import "./proxy-access.css";
 
 async function copyText(value) {
@@ -47,25 +48,43 @@ export function ProxyAccessPanel() {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
   const [revision, setRevision] = useState(0);
+  const [accountId, setAccountId] = useState(null);
+  const [copying, setCopying] = useState(false);
+  const copyRequest = useRef(null);
   useEffect(() => {
     const controller = new AbortController();
+    copyRequest.current?.abort();
+    setCopying(false); setAccountId(null);
     setData(null); setError(""); setMessage(""); setLoading(true);
     api.gatewayProxy({ signal: controller.signal }).then(result => {
       if (!controller.signal.aborted) setData(result);
     }).catch(failure => { if (!controller.signal.aborted) setError(failure.message); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
+    return () => { controller.abort(); copyRequest.current?.abort(); };
   }, [revision]);
   const copyAddress = async address => {
     try { await copyText(address); setMessage("代理地址已复制。"); }
     catch (failure) { setMessage(failure.message); }
   };
+  const copyEnvironment = async () => {
+    const controller = new AbortController();
+    copyRequest.current = controller;
+    setCopying(true); setMessage("");
+    try {
+      const result = data.accounts.length ? await api.gatewayProxyCredentials({ signal: controller.signal }) : { accounts: [] };
+      if (controller.signal.aborted) return;
+      await copyText(proxyEnvironment(data, result.accounts, accountId ?? data.accounts[0]?.id));
+      if (!controller.signal.aborted) setMessage("终端代理配置已复制，可直接粘贴到终端。");
+    } catch (failure) { if (!controller.signal.aborted) setMessage(failure.message); }
+    finally { if (!controller.signal.aborted) setCopying(false); }
+  };
   return <section className="panel proxy-access" aria-labelledby="proxy-access-title">
-    <div className="proxy-access-head"><div><h2 id="proxy-access-title">显式代理配置</h2><p>HTTP / SOCKS5 客户端接入</p></div><button className="filter-button" disabled={loading} onClick={() => setRevision(value => value + 1)}><ArrowClockwise aria-hidden="true" />刷新配置</button></div>
+    <div className="proxy-access-head"><div><h2 id="proxy-access-title">显式代理配置</h2><p>HTTP / SOCKS5 客户端接入</p></div><div className="proxy-config-actions"><button className="filter-button" disabled={!data?.listeners.length || loading || copying} onClick={copyEnvironment}><Copy aria-hidden="true" />{copying ? "正在读取…" : "复制终端配置"}</button><button className="filter-button" disabled={loading} onClick={() => setRevision(value => value + 1)}><ArrowClockwise aria-hidden="true" />刷新配置</button></div></div>
     {loading && <p role="status">正在读取当前代理配置…</p>}
     {error && <p className="proxy-feedback proxy-error" role="alert">{error}</p>}
     {message && <p className="proxy-feedback" role="status">{message}</p>}
     {data && <>
+      {data.accounts.length > 1 && <label className="proxy-copy-account">配置使用的账户<select value={accountId ?? data.accounts[0].id} onChange={event => setAccountId(Number(event.target.value))}>{data.accounts.map(account => <option key={account.id} value={account.id}>{account.username || "（空用户名）"}</option>)}</select></label>}
       <div className="proxy-listeners">{data.listeners.map(listener => <article className="proxy-listener" key={listener.id}><span>{listener.protocol}</span><strong><code>{listener.address || `端口 ${listener.port}`}</code></strong>{listener.address ? <button className="filter-button" onClick={() => copyAddress(listener.address)} aria-label={`复制 ${listener.protocol} 代理地址`}><Copy aria-hidden="true" />复制地址</button> : <small>未检测到接入地址，请使用网关所在主机的地址。</small>}</article>)}</div>
       {!data.listeners.length && <p className="proxy-feedback">当前未启用 HTTP / SOCKS5 代理端口。</p>}
       <div className="proxy-network"><span className="proxy-access-badge">{data.allowLan ? "允许局域网接入" : "仅本机接入"}</span><span>监听地址 <code>{data.bindAddress}</code></span></div>
