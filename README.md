@@ -19,6 +19,7 @@ Egresscope 是一个面向 [mihomo](https://github.com/MetaCubeX/mihomo) 网关�
 - Surge 与 Clash/Mihomo 订阅解析、定时刷新、节点过滤/改名和独立交付链接
 - 可选 DeepSeek / OpenRouter 辅助生成节点过滤建议
 - 管理员与普通用户隔离；普通用户只读授权设备并管理自己的订阅
+- 网关设置 → 代理接入：管理员可查看实时 HTTP/SOCKS5 地址、端口、认证账户和免认证来源，并复制连接信息；密码默认隐藏，点击显示或复制时才读取
 - 深浅色主题，以及桌面、平板和手机响应式布局
 
 ## 统计边界

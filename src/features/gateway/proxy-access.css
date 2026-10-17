@@ -1,0 +1,41 @@
+.proxy-access { padding: 20px; min-width: 0; overflow-y: auto; }
+.proxy-access-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+.proxy-access-head h2 { margin: 0; font-size: 18px; }
+.proxy-access-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.proxy-access .filter-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex-shrink: 0; min-height: 36px; }
+.proxy-access button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.proxy-access .filter-button:disabled { cursor: wait; opacity: .6; }
+.proxy-listeners { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; }
+.proxy-listener { display: grid; gap: 10px; justify-items: start; min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); }
+.proxy-listener > span { font-size: 13px; color: var(--muted); }
+.proxy-listener strong { max-width: 100%; font-size: 20px; overflow-wrap: anywhere; }
+.proxy-listener small { color: var(--muted); font-size: 12px; }
+.proxy-network { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 14px 0 24px; color: var(--muted); font-size: 12px; }
+.proxy-access-badge { padding: 5px 9px; border-radius: 6px; color: var(--primary); background: var(--primary-soft); }
+.proxy-access h3 { margin: 0 0 12px; font-size: 15px; }
+.proxy-account { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 12px; overflow: hidden; }
+.proxy-field { display: grid; grid-template-columns: 70px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 14px; min-width: 0; }
+.proxy-field + .proxy-field { border-top: 1px solid var(--border); }
+.proxy-field > span { color: var(--muted); font-size: 13px; }
+.proxy-field > code { overflow-wrap: anywhere; font-size: 14px; user-select: text; }
+.proxy-password > code { letter-spacing: 3px; }
+.proxy-password input { min-width: 0; width: 100%; border: 0; background: transparent; color: var(--text); font: 13px ui-monospace, monospace; padding: 8px 0; }
+.proxy-field-actions { display: flex; gap: 8px; }
+.proxy-prefixes { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 12px; margin-top: 18px; font-size: 12px; color: var(--muted); }
+.proxy-prefixes > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.proxy-prefixes code { background: var(--surface-subtle); border: 1px solid var(--border); padding: 3px 7px; border-radius: 5px; overflow-wrap: anywhere; color: var(--text); }
+.proxy-feedback { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.proxy-error { color: var(--red); }
+.gateway-tabs:has(.proxy-tab) { max-width: 100%; overflow-x: auto; }
+.gateway-tabs .proxy-tab { white-space: nowrap; }
+@media (max-width: 700px) {
+  .proxy-access { padding: 16px; }
+  .proxy-field { grid-template-columns: 60px minmax(0, 1fr); gap: 8px; padding: 12px; }
+  .proxy-field > button, .proxy-field-actions { grid-column: 2; justify-self: start; flex-wrap: wrap; }
+  .proxy-access .filter-button { min-height: 44px; }
+  .proxy-listener strong { font-size: 18px; }
+  .proxy-prefixes { grid-template-columns: 1fr; gap: 8px; }
+  .gateway-tabs:has(.proxy-tab) button { flex: 0 0 auto; white-space: nowrap; }
+  .gateway-workspace-head:has(.proxy-tab) > .gateway-tabs { grid-column: 1 / -1; grid-row: 2; width: 100%; min-width: 0; justify-self: stretch; }
+  .gateway-workspace-head:has(.proxy-tab) > h2 { white-space: nowrap; }
+}

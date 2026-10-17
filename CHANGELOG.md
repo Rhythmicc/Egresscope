@@ -4,6 +4,10 @@ All notable changes to Egresscope are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Administrator-only proxy access settings with live HTTP/SOCKS5 endpoints, authentication accounts, copy actions, and on-demand password reveal. Credential responses are not cached.
+
 ### Fixed
 
 - Allow gateway subscriptions that do not cover every configured country. Preserve rules and policy topology; empty regional node groups retain explicit fallbacks or use `REJECT` instead of preventing activation.
