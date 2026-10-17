@@ -34,6 +34,7 @@ from .config import Settings
 from .database import connect as connect_database
 from .database import migrate as migrate_database
 from .mihomo import MihomoClient
+from .proxy_access import proxy_access, proxy_credentials
 from .geoip import COUNTRY_FLAGS, GeoIPResolver, install_mmdb_from_url, normalize_country
 from .kernel import KernelManager
 from .rotation import choose_rotation, city_of, normalize_city, pool_profiles
@@ -5429,6 +5430,32 @@ async def device_aliases(admin: dict[str, Any] = Depends(admin_user)) -> dict[st
     # The route is admin-only, so a per-viewer subset branch would be dead code.
     aliases = {address: label for address, label in _aliases().items() if not _is_infrastructure_source(address)}
     return {"aliases": aliases, "devices": await asyncio.to_thread(_known_devices, admin)}
+
+
+async def _live_proxy_config(response: Response) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "Cookie"
+    try:
+        return await mihomo.get("/configs")
+    except (httpx.HTTPError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail="无法读取当前代理配置，请检查 mihomo 状态", headers={"Cache-Control": "no-store"}) from exc
+
+
+@app.get("/api/gateway/proxy")
+async def gateway_proxy(response: Response, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    config = await _live_proxy_config(response)
+    return await asyncio.to_thread(proxy_access, config, settings.lan_network)
+
+
+@app.get("/api/gateway/proxy/credentials")
+async def gateway_proxy_credentials(response: Response, _: dict[str, Any] = Depends(admin_user)) -> dict[str, Any]:
+    config = await _live_proxy_config(response)
+    paths = [path for path in (getattr(settings, "managed_config_path", None), settings.config_path) if path is not None]
+    try:
+        accounts = await asyncio.to_thread(proxy_credentials, config, paths)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="无法读取代理密码，请检查已应用的 mihomo 配置文件", headers={"Cache-Control": "no-store"}) from exc
+    return {"accounts": accounts}
 
 
 @app.get("/api/gateway/runtime")

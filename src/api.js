@@ -143,6 +143,8 @@ export const api = {
   deviceAliases: () => request("/api/device-aliases"),
   saveDeviceAliases: (aliases) => request("/api/device-aliases", { method: "PUT", body: JSON.stringify({ aliases }) }),
   gatewayRuntime: () => request("/api/gateway/runtime"),
+  gatewayProxy: (options = {}) => request("/api/gateway/proxy", options),
+  gatewayProxyCredentials: (options = {}) => request("/api/gateway/proxy/credentials", options),
   gatewayEvents: ({ level = "all", query = "", limit = 200, offset = 0 } = {}) => {
     const search = new URLSearchParams({ level, query, limit: String(limit), offset: String(offset) });
     return request(`/api/gateway/events?${search}`);
